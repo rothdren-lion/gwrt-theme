@@ -69,7 +69,7 @@
 其余 770+ 文件与 r109 逐字节一致（含 r109 新增的 DNS 急救 `gwrt-dns-rescue`、
 WiFi 首启配置 `38/39/40b`、swap 初始化 `40a`、挂载策略 `45` 等）。
 
-配套插件包随仓库 `release/plugins/` 一并提供，详见 `docs/PLUGINS.md`。
+配套插件**不随仓库分发二进制包**（避免再分发第三方作品），获取方式见 `docs/PLUGINS.md`。
 
 ---
 
@@ -83,7 +83,7 @@ r111 在 r110 基础上，进一步移除了**所有第三方应用过滤相关�
 | `overlays/package/gwrt-luci-app-oaf/` | OpenAppFilter 的 `luci-app-oaf` LuCI 视图 `app_filter.htm` | 被**改写并以 `PKG_FLAGS:=force-overwrite` 强制覆盖**第三方 LuCI 视图，删除 |
 | `manifest/overlay-files.txt` | — | overlay 清单已清空（原本只有上述两个 OAF 文件） |
 | `manifest/config.fragment` | — | 移除 `CONFIG_PACKAGE_luci-app-oaf` / `luci-i18n-oaf-zh-cn` / `appfilter` / `kmod-oaf` 四项，不再强制集成 |
-| `release/plugins/` 中的 OAF 包 | — | 移除 `luci-app-oaf-*.apk` / `luci-i18n-oaf-zh-cn-*.apk` / `appfilter-*.apk` 三个第三方二进制包 |
+| `release/plugins/` 全部第三方插件包 | 多个上游项目 | 整个目录已删除 —— 本仓库不再分发任何第三方插件二进制包，改为在 `docs/PLUGINS.md` 中给出各插件的上游地址与获取方式 |
 
 ### 保留的部分（属主题自有代码 / 公开数据）
 

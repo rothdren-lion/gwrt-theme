@@ -1,39 +1,40 @@
 #!/bin/sh
-# GWRT Theme — 一键安装配套插件
+# GWRT Theme — 配套插件安装助手
 #
 # 用法（在路由器上执行）:
 #   wget -O- https://raw.githubusercontent.com/rothdren-lion/gwrt-theme/main/release/install-plugins.sh | sh
 #   或本地: sh install-plugins.sh
 #
-# 覆盖：apk (ImmortalWrt 24.10+/OpenWrt main) 与 opkg (老版本) 两种包管理器。
-# 插件包本体位于本脚本同目录的 plugins/ 下；也可用 -u <url> 指定远程仓库根地址。
+# 说明:
+#   本仓库**不分发任何第三方插件二进制包**（避免再分发第三方作品）。
+#   本脚本只做一件事：尝试从**你设备当前已配置的固件源**里安装所需插件。
+#   源里没有的插件，会打印出上游项目地址与获取方法，请自行下载对应架构的包。
+#
+# 覆盖 apk (ImmortalWrt 24.10+ / OpenWrt main) 与 opkg (老版本) 两种包管理器。
 
 set -e
 
-BASE_DIR="$(cd "$(dirname "$0")" && pwd)"
-REMOTE_BASE="https://raw.githubusercontent.com/rothdren-lion/gwrt-theme/main/release"
-
 usage() {
 	cat <<'EOF'
-用法: sh install-plugins.sh [-u <release仓库URL>] [-h]
+用法: sh install-plugins.sh [-n] [-h]
 
-  -u <url>   release 目录的远程地址（默认 GitHub raw）
+  -n         只列出插件与获取方式，不执行安装
   -h         显示帮助
 
-可安装的插件（缺失时主题会自动降级，不影响主题本体）:
-  bandix-plus         流量统计 — 仪表盘「网速/连接排行」依赖
-  luci-app-bandix-plus
-  coremark            CPU 跑分 — 仪表盘「点击运行 CoreMark」依赖
-  ttyd / luci-app-ttyd  Web 终端
+插件清单（全部可选，缺失时主题自动降级，不影响主题本体）:
+  bandix-plus + luci-app-bandix-plus   流量统计  → 仪表盘「网速/连接排行」
+  coremark                             CPU 跑分   → 仪表盘「点击运行 CoreMark」
+  ttyd + luci-app-ttyd                 Web 终端   → 概览网格「Terminal」
 
-本脚本不安装任何第三方应用特征数据库或改写版第三方包。
-  appfilter           应用特征库
+  appfilter / luci-app-oaf / kmod-oaf  应用过滤  → 仪表盘「活跃 App」
+      ↑ 需自行从固件源获取；内核模块必须与目标机型内核版本匹配，不可跨架构
 EOF
 }
 
-while [ $# -gt 0 ]; do
+DRY_RUN=0
+while [ "$#" -gt 0 ]; do
 	case "$1" in
-		-u) REMOTE_BASE="$2"; shift 2 ;;
+		-n|--dry-run) DRY_RUN=1; shift ;;
 		-h|--help) usage; exit 0 ;;
 		*) echo "未知参数: $1"; usage; exit 1 ;;
 	esac
@@ -52,101 +53,63 @@ else
 fi
 log "包管理器：$PM"
 
-# ── 架构探测（决定是否安装二进制插件）────────────────────────
-detect_arch() {
-	apk --print-arch 2>/dev/null || opkg print-architecture 2>/dev/null || echo unknown
-}
-ARCH="$(detect_arch)"
-log "系统架构：$ARCH"
+# ── 插件元数据 ──────────────────────────────────────────────
+# 用法: "包名|用途|上游地址"
+PLUGINS="
+bandix-plus|流量统计守护（仪表盘网速/连接排行）|https://github.com/timsaya/bandix-plus
+luci-app-bandix-plus|bandix-plus 的 LuCI 界面|https://github.com/timsaya/bandix-plus
+coremark|CPU 跑分（仪表盘点击运行 CoreMark）|https://github.com/eembc/coremark
+ttyd|Web 终端服务端|https://github.com/tsl0922/ttyd
+luci-app-ttyd|Web 终端的 LuCI 界面|https://github.com/openwrt/luci
+luci-i18n-ttyd-zh-cn|Web 终端中文包|https://github.com/openwrt/luci
+luci-i18n-bandix-plus-zh-cn|bandix-plus 中文包|https://github.com/timsaya/bandix-plus
+"
 
-# ── 依赖插件清单 ────────────────────────────────────────────
-# 必需（仪表盘核心数据依赖）: bandix-plus
-# 可选: coremark / ttyd
-REQUIRED_PLUGINS="bandix-plus luci-app-bandix-plus luci-i18n-bandix-plus-zh-cn"
-OPTIONAL_PLUGINS="luci-app-ttyd luci-i18n-ttyd-zh-cn"
-# 架构相关（仅 aarch64 有现成构建）
-ARCH_PLUGINS="ttyd coremark"
-
-# ── 拉取辅助 ────────────────────────────────────────────────
-fetch_pkg() {
-	# $1=包名前缀  $2=子目录（"" 或 "aarch64/"）
-	local name="$1" sub="${2:-}"
-	local local_file="${BASE_DIR}/plugins/${sub}${name}"
-	local url="${REMOTE_BASE}/plugins/${sub}"
-	# 精确版本文件需要先查清单
-	return 0
+print_upstream_hint() {
+	log "  ↳ 上游: $2"
+	log "     若你的固件源没有该包，请自行下载对应架构的安装包后："
+	log "     $PM add --allow-untrusted <包文件>   # apk"
+	log "     opkg install <包文件>                 # opkg"
 }
 
-install_from_dir() {
-	local dir="$1" prefix="$2"
-	[ -d "$dir" ] || return 0
-	local f
-	for f in "$dir"/${prefix}-*.apk "$dir"/${prefix}-*.ipk; do
-		[ -f "$f" ] || continue
-		install_one "$f"
+if [ "$DRY_RUN" -eq 1 ]; then
+	echo "插件清单（不执行安装）:"
+	echo "$PLUGINS" | while IFS='|' read -r name use url; do
+		[ -n "$name" ] || continue
+		printf '  %-26s %s\n' "$name" "$use"
+		printf '  %-26s 上游: %s\n' "" "$url"
 	done
-}
-
-install_one() {
-	local f="$1"
-	local bn
-	bn="$(basename "$f")"
-	case "$PM" in
-		apk)  apk add --allow-untrusted "$f" >/dev/null 2>&1 && log "已安装 $bn" || log "跳过（失败）$bn" ;;
-		opkg) opkg install "$f" >/dev/null 2>&1 && log "已安装 $bn" || log "跳过（失败）$bn" ;;
-	esac
-}
-
-download_pkg() {
-	# 从远程仓库拉一个包（需要 manifest 里给出精确文件名）
-	local name="$1" sub="${2:-}"
-	local fname="$3"
-	local out="/tmp/gwrt-pkg-$fname"
-	if [ -f "${BASE_DIR}/plugins/${sub}${fname}" ]; then
-		cp "${BASE_DIR}/plugins/${sub}${fname}" "$out"
-		return 0
-	fi
-	curl -fsSL -o "$out" "${REMOTE_BASE}/plugins/${sub}${fname}" 2>/dev/null || {
-		log "下载失败: $fname"
-		return 1
-	}
-	echo "$out"
-}
-
-# ── 主流程 ──────────────────────────────────────────────────
-log "安装必需插件…"
-for p in $REQUIRED_PLUGINS; do
-	install_from_dir "${BASE_DIR}/plugins" "$p"
-done
-
-log "安装可选插件…"
-for p in $OPTIONAL_PLUGINS; do
-	install_from_dir "${BASE_DIR}/plugins" "$p"
-done
-
-if [ "$ARCH" = "aarch64_cortex-a53" ]; then
-	log "检测到 aarch64，安装架构相关插件（ttyd / coremark）…"
-	for p in $ARCH_PLUGINS; do
-		install_from_dir "${BASE_DIR}/plugins/aarch64" "$p"
-	done
-else
-	log "架构 $ARCH 暂无预编译的 ttyd/coremark，请从对应固件源安装："
-	log "  opkg install ttyd coremark   # 或   apk add ttyd coremark"
+	exit 0
 fi
 
-# ── 主题收尾：刷新 LuCI 缓存并重启相关服务 ──────────────────
+# ── 安装 ────────────────────────────────────────────────────
+INSTALLED=0
+MISSING=0
+
+echo "$PLUGINS" | while IFS='|' read -r name use url; do
+	[ -n "$name" ] || continue
+	if $PM info -e "$name" >/dev/null 2>&1; then
+		log "已安装，跳过: $name"
+		continue
+	fi
+	log "安装: $name  ($use)"
+	if $PM add "$name" >/dev/null 2>&1 || $PM install "$name" >/dev/null 2>&1; then
+		log "  ✅ 成功"
+	else
+		log "  ⚠️ 固件源中没有该包，需自行下载安装"
+		print_upstream_hint "$name" "$url"
+	fi
+done
+
+# ── 收尾 ────────────────────────────────────────────────────
 log "刷新 LuCI 缓存…"
 rm -f /tmp/luci-indexcache.* 2>/dev/null || true
 rm -rf /tmp/luci-modulecache/ 2>/dev/null || true
 
-if [ -f /etc/init.d/gwrt-clients ]; then
-	/etc/init.d/gwrt-clients restart 2>/dev/null || true
-fi
-if [ -f /etc/init.d/rpcd ]; then
-	/etc/init.d/rpcd reload 2>/dev/null || true
-fi
-if [ -f /etc/init.d/dnsmasq ]; then
-	/etc/init.d/dnsmasq reload 2>/dev/null || true
-fi
+[ -f /etc/init.d/gwrt-clients ] && /etc/init.d/gwrt-clients restart 2>/dev/null
+[ -f /etc/init.d/rpcd ] && /etc/init.d/rpcd reload 2>/dev/null
+[ -f /etc/init.d/dnsmasq ] && /etc/init.d/dnsmasq reload 2>/dev/null
 
 log "完成。刷新浏览器（Ctrl+F5）即可看到完整仪表盘。"
+log "提示：'活跃 App' 卡片需要应用过滤插件（appfilter / luci-app-oaf / kmod-oaf），"
+log "      仓库不提供该类插件，请自行从固件源获取（内核模块须匹配机型内核版本）。"

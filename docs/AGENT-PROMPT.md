@@ -93,14 +93,17 @@ C) 我只有主题包文件（.ipk / .apk），没有源码树
      ssh root@<ip> 'sh /etc/uci-defaults/37_gwrt-dhcp-fp'     # 启用 DHCP 指纹钩子
      ssh root@<ip> 'sh /etc/uci-defaults/36_gwrt-clients-init' # 启用设备守护
 
-3. 无论哪种方案，装完都要：
+3. 配套插件：**本仓库不分发第三方插件二进制包**，请从用户自己固件的 package 源安装：
+   - 流量统计：bandix-plus + luci-app-bandix-plus
+   - CPU 跑分：coremark；Web 终端：ttyd + luci-app-ttyd
+   - 应用过滤：appfilter + luci-app-oaf + kmod-oaf
+     （kmod-oaf 是内核模块，必须与目标机型内核版本匹配，不可跨架构复制）
+   助手脚本（只从已配置的固件源取，源里没有会打印上游地址与安装命令）：
+     ssh root@<ip> 'wget -O- https://raw.githubusercontent.com/rothdren-lion/gwrt-theme/main/release/install-plugins.sh | sh'
+
+4. 无论哪种方案，装完都要：
      ssh root@<ip> 'rm -f /tmp/luci-indexcache.*; rm -rf /tmp/luci-modulecache/; /etc/init.d/rpcd reload'
    否则页面仍是旧模板 / 原生 LuCI。
-
-2. 配套插件同样从 release/plugins/ 取，按架构选择：
-   - 架构无关：release/plugins/*.apk
-   - aarch64 二进制：release/plugins/aarch64/{ttyd,coremark}.apk
-   - 内核模块类插件必须按机型从固件源获取，不可跨架构
 
 ━━━ 通用注意事项 ━━━
 

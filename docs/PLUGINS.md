@@ -6,58 +6,72 @@ GWRT 主题的核心（仪表盘、主题样式、菜单、设备指纹、EQoS �
 
 ## 1. 插件清单
 
-### 必需插件（缺失时对应卡片降级，不会导致主题不可用）
+> **本仓库不分发任何第三方插件二进制包**。以下插件请自行从你所用固件的 package 源
+> 获取，或从上游项目页下载对应架构的安装包。
 
-| 插件 | 作用 | 缺失后果 | 架构 |
+### 1.1 流量统计（仪表盘「网速-EQoS」「连接数」「连接排行」）
+
+| 包名 | 作用 | 缺失后果 | 上游 |
 |---|---|---|---|
-| `bandix-plus` | 流量统计守护 | 「网速-EQoS」卡片无实时速率、连接排行空白 | 无关（脚本/Lua） |
-| `luci-app-bandix-plus` | bandix-plus LuCI 界面 | 同上 | 无关 |
-| `luci-i18n-bandix-plus-zh-cn` | bandix 中文翻译 | 界面英文 | 无关 |
+| `bandix-plus` | 流量统计守护进程 | 网速卡片无实时速率、连接排行空白 | <https://github.com/timsaya/bandix-plus> |
+| `luci-app-bandix-plus` | 上述的 LuCI 界面 | 同上 | 同上 |
+| `luci-i18n-bandix-plus-zh-cn` | 中文翻译 | 界面英文 | 同上 |
 
-### 可选插件（纯粹是锦上添花）
+获取方式：
+- 固件源已包含 → `apk add bandix-plus luci-app-bandix-plus` / `opkg install bandix-plus luci-app-bandix-plus`
+- 固件源没有 → 从上游 Releases 下载对应架构的包，本地 `apk add --allow-untrusted <包文件>`
 
-| 插件 | 作用 | 缺失后果 | 架构 |
+### 1.2 CPU 跑分（仪表盘「点击运行 CoreMark」）
+
+| 包名 | 作用 | 缺失后果 | 上游 |
 |---|---|---|---|
-| `coremark` | CPU 跑分 | 仪表盘无「点击运行 CoreMark」按钮 | **aarch64 预编译** |
-| `ttyd` + `luci-app-ttyd` | Web 终端 | 概览网格无「Terminal」图标 | **aarch64 预编译** |
-| `luci-app-openclash` | 科学上网 | 概览网格无「科学上网」图标 | 无关（Lua） |
+| `coremark` | 跑分程序 | 无跑分按钮 | <https://github.com/eembc/coremark> |
 
-### 关于应用过滤（appfilter）
+获取方式：固件源（`coremark`，Apache-2.0）；`coremark` 为 aarch64 预编译，
+其他架构需自行编译。**注意**：`coremark` 会在路由器上跑满 CPU，建议仅在需要时手动触发。
 
-主题**不附带也不集成**任何第三方应用特征数据库或被改写的第三方 LuCI 视图。
-仪表盘的「活跃 App」卡片通过标准 ubus 接口（`appfilter` / `oaf`）**可选探测**：
-- 系统自行安装了应用过滤插件 → 主题展示对应 App 数据
-- 未安装 → 该卡片降级为空，其余功能不受影响
+### 1.3 Web 终端（概览网格「Terminal」图标）
 
-如果你需要该功能，请自行从你所用固件的 package 源安装对应插件
-（`appfilter` / `luci-app-oaf` / `kmod-oaf`），并注意 `kmod-oaf` 是内核模块，
-必须与目标机型的内核版本严格匹配，不可跨架构复制。
+| 包名 | 作用 | 缺失后果 | 上游 |
+|---|---|---|---|
+| `ttyd` | 终端服务端 | 无 Terminal 图标 | <https://github.com/tsl0922/ttyd> (MIT) |
+| `luci-app-ttyd` | LuCI 界面 | 同上 | <https://github.com/openwrt/luci> |
+| `luci-i18n-ttyd-zh-cn` | 中文翻译 | 界面英文 | 同上 |
 
-## 2. 仓库内的插件包位置
+获取方式：固件源（`luci-app-ttyd` + `ttyd`）。`ttyd` 为 aarch64 预编译。
 
-```
-release/plugins/                 架构无关（Lua / JS / 脚本）
-  bandix-plus-*.apk
-  luci-app-bandix-plus-*.apk
-  luci-app-ttyd-*.apk
-  luci-i18n-*.apk
-release/plugins/aarch64/         aarch64 二进制
-  ttyd-*.apk
-  coremark-*.apk
-release/plugins/optional/        大体积可选插件
-  luci-app-openclash-*.apk
-```
+### 1.4 应用过滤（仪表盘「活跃 App」）
 
-> 本目录只提供**原版上游**构建的插件包（Apache-2.0 / MIT，允许再分发）。
-> 任何被修改过的第三方组件、以及第三方专有数据库，均不随本仓库发布。
+| 包名 | 作用 | 缺失后果 | 上游 |
+|---|---|---|---|
+| `appfilter` | 应用特征库 + 用户界面 | 「活跃 App」为空 | <https://github.com/iveco/luci-app-appfilter> |
+| `luci-app-oaf` | OpenAppFilter 的 LuCI 界面 | 同上 | <https://github.com/destan19/OpenAppFilter> |
+| `kmod-oaf` | OAF 内核模块 | 前两者无法安装（依赖不满足） | 同上 |
 
-一键安装（在路由器上执行）：
+获取方式：**只能从你所用固件的 package 源获取**。
+> ⚠️ `kmod-oaf` 是内核模块，必须与目标机型的内核版本严格匹配，**不可跨架构/跨版本复制**。
+> 本仓库不提供该插件，也不提供任何第三方应用特征数据库。
+
+### 1.5 其他（概览网格图标，可选）
+
+| 包名 | 作用 | 缺失后果 | 上游 |
+|---|---|---|---|
+| `luci-app-openclash` | 科学上网 | 无「科学上网」图标 | <https://github.com/vernesong/OpenClash> |
+
+## 2. 一键安装助手
+
+`release/install-plugins.sh` 只做一件事：**尝试从你设备当前已配置的固件源**安装上表插件；
+源里没有的，会打印出上游项目地址与本地安装命令。
 
 ```sh
+# 尝试安装
 wget -O- https://raw.githubusercontent.com/rothdren-lion/gwrt-theme/main/release/install-plugins.sh | sh
+
+# 只看清单与上游地址，不安装
+wget -O- https://raw.githubusercontent.com/rothdren-lion/gwrt-theme/main/release/install-plugins.sh | sh -s -- -n
 ```
 
-脚本会自动探测 `apk` / `opkg` 与系统架构，只安装对应架构的包。
+脚本自动探测 `apk` / `opkg`，装完会清 LuCI 缓存并 reload rpcd。
 
 ## 3. 关键问题：单独编译 ipk/apk 安装，会功能缺失吗？
 

@@ -99,8 +99,10 @@ C) 我只有主题包文件（.ipk / .apk），没有源码树
    sh 33_gwrt-dashboard   # 替换 admin_status 入口模板
    sh 36_gwrt-clients-init # 启用设备守护
    sh 37_gwrt-dhcp-fp     # 启用 DHCP 指纹钩子
-3. 插件按架构选：release/plugins/*.apk（通用）、release/plugins/aarch64/（二进制）
-   内核模块类插件必须按机型获取，不可跨架构
+3. 配套插件从你自己的固件源装（仓库不分发第三方二进制包）：
+   流量统计 bandix-plus+luci-app-bandix-plus / 跑分 coremark / 终端 ttyd+luci-app-ttyd
+   应用过滤 appfilter+luci-app-oaf+kmod-oaf（内核模块必须按机型获取，不可跨架构）
+   助手脚本：wget -O- .../release/install-plugins.sh | sh
 
 ━━━ 通用注意事项 ━━━
 
@@ -118,18 +120,24 @@ C) 我只有主题包文件（.ipk / .apk），没有源码树
 
 ## 📦 配套插件
 
-主题核心功能**全部内置**，插件缺失只降级不报错：
+主题核心功能**全部内置**，插件缺失只降级不报错。
+**本仓库不分发任何第三方插件二进制包** —— 请自行从你所用固件的 package 源获取，或从上游项目页下载对应架构的安装包。
 
-| 插件 | 用途 | 缺失后果 | 架构 |
+| 插件 | 用途 | 缺失后果 | 获取方式 |
 |---|---|---|---|
-| `bandix-plus` + `luci-app-bandix-plus` | 流量统计 | 网速卡片无速率 | 无关 |
-| `coremark` | CPU 跑分 | 无跑分按钮 | **aarch64** |
-| `ttyd` + `luci-app-ttyd` | Web 终端 | 无 Terminal 图标 | **aarch64** |
+| `bandix-plus` + `luci-app-bandix-plus` | 流量统计 | 网速卡片无速率、连接排行空白 | 固件源 / <https://github.com/timsaya/bandix-plus> |
+| `coremark` | CPU 跑分 | 无跑分按钮 | 固件源 / <https://github.com/eembc/coremark> |
+| `ttyd` + `luci-app-ttyd` | Web 终端 | 无 Terminal 图标 | 固件源 / <https://github.com/tsl0922/ttyd> |
+| `appfilter` + `luci-app-oaf` + `kmod-oaf` | 应用过滤 | 「活跃 App」为空 | 固件源（`kmod-oaf` 为内核模块，**必须匹配机型内核版本**） |
+| `luci-app-openclash` | 科学上网 | 无「科学上网」图标 | 固件源 / <https://github.com/vernesong/OpenClash> |
 
-一键安装：
+一键尝试安装（只从**你设备已配置的固件源**取，源里没有会打印上游地址）：
 
 ```sh
 wget -O- https://raw.githubusercontent.com/rothdren-lion/gwrt-theme/main/release/install-plugins.sh | sh
+
+# 只看清单不安装
+wget -O- https://raw.githubusercontent.com/rothdren-lion/gwrt-theme/main/release/install-plugins.sh | sh -s -- -n
 ```
 
 详见 [`docs/PLUGINS.md`](docs/PLUGINS.md)。
