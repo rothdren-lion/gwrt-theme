@@ -15,9 +15,6 @@
     "/usr/libexec/syslog-wrapper": [
      "exec"
     ],
-    "/usr/libexec/gwrt-ota": [
-     "exec"
-    ],
     "/usr/libexec/gwrt-lan-alias": [
      "exec"
     ],

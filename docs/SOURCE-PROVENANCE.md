@@ -52,3 +52,21 @@
 ### 结论
 
 **源码树 = 当前 192.168.9.9 上运行的主题（r92）逐字节一致**，另含 9 个原始 uci-defaults 与 Makefile 使其可编译。
+
+---
+
+## 开源版 r110（2026-10-22）
+
+本仓库发布的是 **r110**，基于构建树 `package/gwrt-theme/luci-theme-gwrt` 的 **r109** 制作，
+相对 r109 做了三项面向公开发布的改动：
+
+| 改动 | 说明 |
+|---|---|
+| **移除 OTA 功能** | 删除 `usr/libexec/gwrt-ota`、`etc/uci-defaults/32_gwrt-ota-github-hosts`；移除 `31_luci-theme-gwrt` 中的 OTA manifest 配置；剥离 `index_gwrt.ut` 中全部 OTA JS（约 7.7 KB）与仪表盘固件卡片上的升级按钮；移除 rpcd ACL 中的 `/usr/libexec/gwrt-ota` 条目；清理 `cascade.css` 中的 `.gwrt-ota-*` 样式；footer 链接由 `gwrt-ota` 仓库改指本仓库 |
+| **脱敏 `etc/config/gwrt`** | 原文件含 9 条真实设备的 MAC 标注（Sony-TV / chuangmi_camera / Kinder5 / ESP32-BSM 等），公开发布版仅保留出厂默认段（usb_lan / theme / he），设备标注需由使用者自行配置 |
+| **版本号 +1** | `PKG_RELEASE` 109 → 110，便于区分开源版与内部版 |
+
+其余 770+ 文件与 r109 逐字节一致（含 r109 新增的 DNS 急救 `gwrt-dns-rescue`、
+WiFi 首启配置 `38/39/40b`、swap 初始化 `40a`、挂载策略 `45` 等）。
+
+配套插件包随仓库 `release/plugins/` 一并提供，详见 `docs/PLUGINS.md`。

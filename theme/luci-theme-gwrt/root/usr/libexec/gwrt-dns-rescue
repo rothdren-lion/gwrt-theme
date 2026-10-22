@@ -1,0 +1,130 @@
+#!/bin/sh
+# GWRT DNS 急救 (gwrt-dns-rescue)
+# 一键清理 DNS/代理插件退出后的残留，恢复系统默认解析：
+#   1. 卸载 /etc/resolv.conf 上的劫持挂载
+#   2. 恢复 /etc/resolv.conf 符号链接（dnsmasq 重启会重建内容）
+#   3. 清理 dnsmasq 里指向本地死端口的插件残留（server/noresolv/resolvfile/port）
+#   4. 清理把 53 端口重定向到本地死端口的 nft 规则（保留系统 DNSMASQ HIJACK）
+#   5. 重启 dnsmasq 并自检解析
+# 输出: JSON {"ok":bool,"actions":[...],"warnings":[...],"test":"..."}
+
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
+ACTIONS=""; WARNINGS=""; TESTMSG=""; OK=0
+
+jesc() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+act() { A=$(jesc "$1"); ACTIONS="${ACTIONS:+$ACTIONS,}\"$A\""; }
+wrn() { W=$(jesc "$1"); WARNINGS="${WARNINGS:+$WARNINGS,}\"$W\""; }
+
+# ---------- 1. 卸载 resolv.conf 上的劫持挂载 ----------
+n=0
+while mount | grep -q ' on /etc/resolv.conf '; do
+	umount /etc/resolv.conf 2>/dev/null || { wrn "无法卸载 /etc/resolv.conf 挂载"; break; }
+	n=$((n+1))
+done
+while mount | grep -q ' on /tmp/resolv.conf '; do
+	umount /tmp/resolv.conf 2>/dev/null || break
+	n=$((n+1))
+done
+[ "$n" -gt 0 ] && act "卸载了 $n 层 resolv.conf 劫持挂载"
+
+# ---------- 2. 恢复 /etc/resolv.conf 符号链接 ----------
+if [ ! -L /etc/resolv.conf ] || [ "$(readlink /etc/resolv.conf 2>/dev/null)" != "/tmp/resolv.conf" ]; then
+	rm -f /etc/resolv.conf 2>/dev/null
+	ln -s /tmp/resolv.conf /etc/resolv.conf 2>/dev/null && act "恢复 /etc/resolv.conf 符号链接"
+fi
+
+# ---------- 3. 清理 dnsmasq 里的插件残留 ----------
+changed=0
+for s in $(uci -q get dhcp.@dnsmasq[0].server 2>/dev/null); do
+	case "$s" in
+		127.0.0.1#*|::1#*|localhost#*)
+			p="${s##*#}"
+			if [ "$p" != "53" ]; then
+				uci -q del_list "dhcp.@dnsmasq[0].server=$s" && { act "移除上游残留 $s"; changed=1; }
+			fi
+			;;
+	esac
+done
+if [ "$(uci -q get dhcp.@dnsmasq[0].noresolv 2>/dev/null)" = "1" ]; then
+	left=$(uci -q get dhcp.@dnsmasq[0].server 2>/dev/null | wc -w)
+	if [ "$left" -eq 0 ]; then
+		uci -q set dhcp.@dnsmasq[0].noresolv='0'
+		act "关闭 noresolv（恢复 resolv.conf 上游）"
+		changed=1
+	fi
+fi
+rf=$(uci -q get dhcp.@dnsmasq[0].resolvfile 2>/dev/null)
+if [ -n "$rf" ] && [ "$rf" != "/tmp/resolv.conf.d/resolv.conf.auto" ] && [ ! -e "$rf" ]; then
+	uci -q set dhcp.@dnsmasq[0].resolvfile='/tmp/resolv.conf.d/resolv.conf.auto'
+	act "恢复 resolvfile 默认值"
+	changed=1
+fi
+dp=$(uci -q get dhcp.@dnsmasq[0].port 2>/dev/null)
+if [ -n "$dp" ] && [ "$dp" != "53" ] && ! netstat -lnt 2>/dev/null | grep -q ':53 '; then
+	uci -q delete dhcp.@dnsmasq[0].port
+	act "恢复 dnsmasq 端口 53"
+	changed=1
+fi
+[ "$changed" -eq 1 ] && uci -q commit dhcp
+
+# ---------- 4. 清理指向本地死端口的 53 重定向 nft 规则 ----------
+nft -a list ruleset 2>/dev/null | awk '
+	/^table /{ fam=$2; tbl=$3 }
+	/^[[:space:]]+chain /{ ch=$2 }
+	/dport 53/ && (/redirect to :[0-9]+/ || /dnat to [^ ]*:[0-9]+/) {
+		if (!match($0, /# handle [0-9]+/)) next
+		h=substr($0, RSTART+9, RLENGTH-9)
+		p=""
+		if (match($0, /redirect to :[0-9]+/)) p=substr($0, RSTART+13, RLENGTH-13)
+		else if (match($0, /dnat to [^ ]*:[0-9]+/)) { s=substr($0, RSTART, RLENGTH); sub(/.*:/, "", s); p=s }
+		if (p != "" && p != "53") print fam" "tbl" "ch" "h" "p
+	}' | while read -r fam tbl ch h p; do
+	[ -n "$fam" ] && [ -n "$tbl" ] && [ -n "$ch" ] && [ -n "$h" ] || continue
+	if ! netstat -lntu 2>/dev/null | grep -q ":$p "; then
+		nft delete rule "$fam" "$tbl" "$ch" handle "$h" 2>/dev/null && echo "removed $p"
+	fi
+done > /tmp/gwrt-dns-rescue.nft 2>/dev/null
+if [ -s /tmp/gwrt-dns-rescue.nft ]; then
+	cnt=$(wc -l < /tmp/gwrt-dns-rescue.nft)
+	act "清理 $cnt 条指向死端口的 DNS 重定向规则"
+fi
+rm -f /tmp/gwrt-dns-rescue.nft
+
+# ---------- 5. 重启 dnsmasq 并自检 ----------
+/etc/init.d/dnsmasq enabled 2>/dev/null || /etc/init.d/dnsmasq enable 2>/dev/null
+/etc/init.d/dnsmasq restart >/dev/null 2>&1
+sleep 2
+
+# dnsmasq 重启会重建 /tmp/resolv.conf；保险起见再检查一次
+if ! grep -q '^nameserver 127.0.0.1' /tmp/resolv.conf 2>/dev/null; then
+	printf 'search lan\nnameserver 127.0.0.1\nnameserver ::1\n' > /tmp/resolv.conf
+	act "补写 /tmp/resolv.conf"
+fi
+
+if pidof dnsmasq >/dev/null 2>&1; then
+	act "dnsmasq 已运行"
+else
+	wrn "dnsmasq 未在运行"
+fi
+
+p53=$(netstat -tlnp 2>/dev/null | awk '/:53 /{print $7; exit}')
+case "$p53" in
+	*dnsmasq*) ;;
+	"") wrn "53 端口无监听" ;;
+	*) wrn "53 端口被非 dnsmasq 进程占用 ($p53)" ;;
+esac
+
+if nslookup www.baidu.com 127.0.0.1 >/dev/null 2>&1; then
+	ip=$(nslookup www.baidu.com 127.0.0.1 2>/dev/null | awk '/^Address: /{print $2; exit}')
+	TESTMSG="解析正常（www.baidu.com → ${ip:-ok}）"
+	OK=1
+else
+	TESTMSG="解析仍失败"
+	wrn "自检解析失败：请检查 WAN 连接或上游 DNS"
+fi
+
+printf '{"ok":%s,"actions":[%s],"warnings":[%s],"test":"%s"}\n' \
+	"$([ "$OK" -eq 1 ] && echo true || echo false)" "$ACTIONS" "$WARNINGS" "$(jesc "$TESTMSG")"
+exit 0

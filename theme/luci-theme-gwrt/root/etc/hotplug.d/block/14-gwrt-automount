@@ -1,0 +1,50 @@
+#!/bin/sh
+# GWRT 自动挂载规则（2026-10-21 用户确定）：
+#   - 只挂"整盘的最后分区"，且文件系统必须是 ext4
+#   - 其它分区 / 其它格式（squashfs、swap、空分区、内核槽等）一律不挂
+#   目的：避免误挂内核/固件分区（HLOS/rootfs 槽）刷 mount failed 日志，也避免抢挂 rootfs
+# 配套：45_gwrt-mount-policy 关闭 fstab anon_mount/anon_swap 并停用 stock 15-automount
+[ "${ACTION:-}" = "add" ] || [ "${ACTION:-}" = "remove" ] || exit 0
+
+DEV="${DEVNAME:-}"
+case "$DEV" in
+	mmcblk[0-9]*p[0-9]*|sd[a-z][0-9]*|nvme[0-9]*n[0-9]*p[0-9]*|vd[a-z][0-9]*|hd[a-z][0-9]*) ;;
+	*) exit 0 ;;
+esac
+
+MNT="/mnt/$DEV"
+
+if [ "$ACTION" = "remove" ]; then
+	grep -q " $MNT " /proc/mounts && umount -l "$MNT" 2>/dev/null
+	exit 0
+fi
+
+# 整盘名：去掉结尾的 pN / N
+DISK=$(printf '%s' "$DEV" | sed -E 's/p?[0-9]+$//')
+
+# 找整盘的最后分区
+LAST=""; LASTN=0
+for e in /sys/class/block/${DISK}p[0-9]*/uevent /sys/class/block/${DISK}[0-9]*/uevent; do
+	[ -f "$e" ] || continue
+	b=$(basename "$(dirname "$e")")
+	[ "$b" = "$DISK" ] && continue
+	n=$(printf '%s' "$b" | sed -E "s/^${DISK}p?([0-9]+)$/\1/")
+	case "$n" in ''|*[!0-9]*) continue ;; esac
+	if [ "$n" -gt "$LASTN" ]; then LASTN=$n; LAST=$b; fi
+done
+
+# 只有"当前事件就是最后分区"才继续
+[ "$DEV" = "$LAST" ] || exit 0
+
+# 已挂载则跳过
+grep -q " $MNT " /proc/mounts && exit 0
+
+# 只挂 ext4（block info 比 blkid 更可靠）
+TYPE=$(block info "/dev/$DEV" 2>/dev/null | sed -n 's/.*TYPE="\([^"]*\)".*/\1/p')
+[ "$TYPE" = "ext4" ] || exit 0
+
+mkdir -p "$MNT"
+chmod 0777 "$MNT" 2>/dev/null
+mount -t ext4 -o rw,noatime "/dev/$DEV" "$MNT" 2>/dev/null \
+	&& logger -t gwrt-automount "已挂载 $DEV -> $MNT（整盘最后分区, ext4）"
+exit 0

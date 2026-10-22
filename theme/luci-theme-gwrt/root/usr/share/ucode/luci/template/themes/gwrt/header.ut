@@ -80,7 +80,7 @@
 	</script>
 
 	<!-- Main Stylesheet -->
-	<link rel="stylesheet" href="/luci-static/gwrt/css/cascade.css?v=20260903r88">
+	<link rel="stylesheet" href="/luci-static/gwrt/css/cascade.css?v=20261020r101">
 
 	<!-- Stylesheets -->
 	{% if (node?.css): %}

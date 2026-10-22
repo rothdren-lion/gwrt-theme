@@ -1,0 +1,35 @@
+#!/bin/sh
+# 38_gwrt-wifi-channel — GWRT 默认信道（首启一次，用户后续手改不受影响）
+#   2026-10-14 用户确定：
+#     5.8G（6018 内置 5G，c000000.wifi）      → 149 起（UNII-3，不走 36-48 低频）
+#     5.2G（QCN9074 PCIe 三频，仅 SS-02 类）  → 36
+#     2.4G 不动（保持默认 1）
+# 2026-10-21: 包升级重装会重跑 uci-defaults —— once-marker 保证只生效一次（恢复出厂后重跑）
+[ -e /etc/gwrt/wifi-channel.once ] && exit 0
+[ -x /sbin/wifi ] || exit 0
+. /lib/functions/gwrt-wireless.sh
+
+changed=0; seen=0
+for radio in $(uci -q show wireless | sed -n "s/^wireless\.\(radio[0-9]*\)=.*/\1/p"); do
+	path=$(uci -q get wireless.$radio.path)
+	band=$(uci -q get wireless.$radio.band)
+	[ -n "$path" ] || continue
+	role=$(gwrt_wifi_role "$path" "$band") || continue
+	case "$role" in
+		5.8G) want=149 ;;
+		5.2G) want=36 ;;
+		*) continue ;;
+	esac
+	seen=1
+	cur=$(uci -q get wireless.$radio.channel)
+	if [ "$cur" != "$want" ]; then
+		uci set wireless.$radio.channel="$want"
+		logger -t 38_gwrt-wifi-channel "$radio($role) channel $cur -> $want"
+		changed=1
+	fi
+done
+[ "$changed" = "1" ] && uci commit wireless
+# 只有真的看到目标频段才落 once 标记：首启 ~20s 时 wireless 配置可能还没生成，
+# 空跑就落标记会导致此后再也不修（261021-01 真机教训）
+[ "$seen" = "1" ] && { mkdir -p /etc/gwrt && touch /etc/gwrt/wifi-channel.once; }
+exit 0

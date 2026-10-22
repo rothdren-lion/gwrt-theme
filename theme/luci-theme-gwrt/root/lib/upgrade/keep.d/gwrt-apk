@@ -1,0 +1,2 @@
+# GWRT: keep the apk timeout config across sysupgrade
+/etc/apk/config

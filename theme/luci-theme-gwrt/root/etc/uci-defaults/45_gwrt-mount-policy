@@ -1,0 +1,42 @@
+#!/bin/sh
+# GWRT 挂载策略（2026-10-21 用户确定）：
+#   - 关闭 fstab 的通用 anon_mount / anon_swap：不再自动挂载所有分区
+#     （真机教训：cs-07 把 squashfs 的 HLOS_1 分区当数据盘挂 -> mount failed (22) 刷日志）
+#   - 停用 stock 15-automount（sd* 全分区自动挂载），统一走 14-gwrt-automount：
+#     只挂"整盘最后分区 + 仅 ext4"
+#   - swap 由 40a_gwrt-swap-setup 单独处理（GPT 名 swap / TYPE=swap）
+#   - 清理历史上自动加进来的非数据分区 fstab 条目
+# 只在首刷/恢复出厂后运行一次；包升级重装靠 once-marker 跳过
+[ -e /etc/gwrt/mount-policy.once ] && exit 0
+
+uci -q set fstab.@global[0].anon_mount='0'
+uci -q set fstab.@global[0].anon_swap='0'
+uci -q commit fstab
+
+# 删除指向非 ext4 分区的自动挂载条目（保留 /overlay /rom 系统条目）
+i=0
+while uci -q get "fstab.@mount[$i]" >/dev/null 2>&1; do
+	target=$(uci -q get "fstab.@mount[$i].target")
+	case "$target" in
+		/overlay|/rom|/mnt/storage)
+			i=$((i+1)); continue ;;
+		/mnt/mmcblk*p*|/mnt/sd*|/mnt/nvme*)
+			dev=$(uci -q get "fstab.@mount[$i].device")
+			[ -n "$dev" ] || dev="/dev/$(basename "$target")"
+			if [ "$(block info "$dev" 2>/dev/null | sed -n 's/.*TYPE="\([^"]*\)".*/\1/p')" != "ext4" ]; then
+				logger -t 45_gwrt-mount-policy "清理非 ext4 自动挂载条目: $target"
+				uci -q delete "fstab.@mount[$i]"
+				uci -q commit fstab
+				continue
+			fi
+			;;
+	esac
+	i=$((i+1))
+done
+
+# 停用 stock sd* 自动挂载（统一由 14-gwrt-automount 处理；block-mount 重装会恢复该文件）
+rm -f /etc/hotplug.d/block/15-automount
+
+mkdir -p /etc/gwrt && touch /etc/gwrt/mount-policy.once
+logger -t 45_gwrt-mount-policy "挂载策略生效：anon_mount/anon_swap=0；自动挂载=整盘最后分区+仅 ext4"
+exit 0

@@ -4,7 +4,7 @@
 # 2026-10-03 用户确定（发行版面向他人选用）：
 #   默认开启：系统必要服务（不动）+ aof(appfilter) + eqos + 网络唤醒(etherwake)
 #              + 流量管理(bandix-plus) + gwrt-agent
-#   默认关闭（用户手工开）：daed、openclash、passwall、podman、samba4、aria2、
+#   默认关闭（用户手工开）：daed、openclash、passwall、podman、aria2、
 #              gecoosac、transmission、nfs、miniupnpd 等
 #   原因：多代理是给用户选的，不是全开的；开机会吃光内存。
 #
@@ -15,8 +15,13 @@
 #
 # 本脚本只在首次刷机运行一次。用户之后手动改的开关不受影响。
 
-# --- 必须开的（发行版默认）---
-for svc in appfilter eqos etherwake bandix-plus gwrt-agent; do
+# 2026-10-21: 包升级重装会重跑 uci-defaults —— once-marker 保证只生效一次（恢复出厂后重跑）
+[ -e /etc/gwrt/autostart-policy.once ] && exit 0
+
+# --- 必须开的（发行版默认；2026-10-09 用户确定 aof 与 smb 也要默认开）---
+# 注：aof(appfilter) 开启时不得关掉硬件加速（NSS/PPE/ECM/HNAT），
+# 依赖 fwx.advanced.disable_hnat=0（见下方 HNAT 段与 /usr/bin/hnat.sh 逻辑）。
+for svc in appfilter samba4 eqos etherwake bandix-plus gwrt-agent; do
 	if [ -x "/etc/init.d/$svc" ]; then
 		/etc/init.d/$svc enable 2>/dev/null
 	fi
@@ -29,14 +34,15 @@ if uci -q get fwx.advanced >/dev/null 2>&1; then
 fi
 
 # --- 必须关的（用户手工开）---
-for svc in daed openclash passwall podman samba4 aria2 gecoosac transmission transmission-daemon nfs miniupnpd samba kixdns smartdns; do
+for svc in daed openclash passwall podman aria2 gecoosac transmission transmission-daemon nfs miniupnpd samba kixdns smartdns; do
 	if [ -x "/etc/init.d/$svc" ]; then
 		/etc/init.d/$svc disable 2>/dev/null
 		/etc/init.d/$svc stop 2>/dev/null
 	fi
 done
 
-# daed 例外说明：S99 是旧版残留，发行版默认手动。如用户已手动开启则不动。
-# （uci-defaults 只跑一次，已开启的用户配置不受影响。）
+# daed 说明：默认关（2026-10-21 用户确认：不需要自动启动，手工开）。
+# 包默认 `enabled '0'`，init 拒绝启动；用户手动勾选 Enable 保存后即可运行。
 
+mkdir -p /etc/gwrt && touch /etc/gwrt/autostart-policy.once
 exit 0

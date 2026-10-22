@@ -1,5 +1,7 @@
 #!/bin/sh
 # GWRT: NFS —— 默认关闭可在 LuCI 手动开，路径与 SMB 同一数据分区
+# 2026-10-21: 包升级重装会重跑 uci-defaults —— once-marker 保证只生效一次（恢复出厂后重跑）
+[ -e /etc/gwrt/nfs-setup.once ] && exit 0
 SHARE="$(uci -q get gwrt.storage_mount)"; [ -n "$SHARE" ] || SHARE=/mnt/mmcblk0p27
 NET="$(uci -q get network.lan.ipaddr | cut -d. -f1-3)"; [ -n "$NET" ] || NET=192.168.3
 
@@ -18,4 +20,5 @@ cat > /etc/exportfs.d/gwrt.exports <<EOF
 $SHARE $NET.0/24(rw,sync,no_subtree_check,no_root_squash,fsid=0)
 EOF
 logger -t 43_gwrt-nfs "NFS 导出 $SHARE 已配置（默认 disabled，LuCI 手开；/etc/exportfs.d/gwrt.exports）"
+mkdir -p /etc/gwrt && touch /etc/gwrt/nfs-setup.once
 exit 0

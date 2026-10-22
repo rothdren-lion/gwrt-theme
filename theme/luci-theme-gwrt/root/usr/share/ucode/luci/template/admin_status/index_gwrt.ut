@@ -39,7 +39,7 @@
 			<div class="stat-row"><span class="stat-row-label" data-i18n="内核">内核</span><span class="stat-row-val" id="gwrtKernel">-</span></div>
 			<div class="stat-row"><span class="stat-row-label" data-i18n="运行时间">运行时间</span><span class="stat-row-val" id="gwrtUptime">-</span></div>
 			<div class="stat-row"><span class="stat-row-label" data-i18n="本地时间">本地时间</span><span class="stat-row-val" id="gwrtLocaltime">-</span></div>
-			<div class="stat-row gwrt-ota-row"><span class="stat-row-label" data-i18n="固件">固件</span><span class="stat-row-val" id="gwrtFirmware">-</span><button type="button" class="gwrt-ota-btn gwrt-ota-busy" id="gwrtOtaBtn" disabled>检查中</button></div>
+			<div class="stat-row"><span class="stat-row-label" data-i18n="固件">固件</span><span class="stat-row-val" id="gwrtFirmware">-</span></div>
 		</div>
 
 		<div class="stat-card" data-gwrt="cpu_temp">
@@ -2296,14 +2296,18 @@ function renderPortStrip(states,ports){
     if(tag){p.label=(p.role==='wan'?'WAN*':'LAN*')+tag;window._gwrtRateLabels[p.name]=p.label;}
     else if(window._gwrtRateLabels[p.name]){p.label=window._gwrtRateLabels[p.name];}
   });
-  wanPorts.forEach(function(p,i){html+=phtml(p,i);});
+  if(wanPorts.length){
+    html+='<div class="gwrt-port-group group-wan" style="--grp-grow:'+wanPorts.length+'">';
+    wanPorts.forEach(function(p,i){html+=phtml(p,i);});
+    html+='</div>';
+  }
   if(lanOnly.length){
-    html+='<div class="gwrt-port-group group-lan">';
+    html+='<div class="gwrt-port-group group-lan" style="--grp-grow:'+lanOnly.length+'">';
     lanOnly.forEach(function(p,i){html+=phtml(p,(isSs01?0:wanPorts.length)+i);});
     html+='</div>';
   }
   if(wifiOnly.length){
-    html+='<div class="gwrt-port-group group-wifi">';
+    html+='<div class="gwrt-port-group group-wifi" style="--grp-grow:'+wifiOnly.length+'">';
     wifiOnly.forEach(function(p,i){html+=phtml(p,wanPorts.length+lanOnly.length+i);});
     html+='</div>';
   }
@@ -2759,11 +2763,50 @@ function renderDhcp(leases,bdev,bOnline,oafUsers,hostHints){
 
 /* Previous WAN bytes for rate calculation */
 var wanPrev=null;
-var gwrtOtaChecked=false;
-var gwrtOtaChecking=false;
-var gwrtOtaApplying=false;
-var gwrtOtaCurrentVersion='';
-var gwrtOtaInfo=null;
+/* GWRT 2026-10-20: 读网卡计数器。
+   rpcd 的 file.read 对 sys/class/net 下的 statistics 文件返回错误码 6（ACL 不放行），
+   改用 file.exec /bin/cat（主题 ACL 已放行 /bin/cat: exec）。 */
+function gwrtCatNetCounter(dev,what){
+  if(!dev||!what)return Promise.resolve(null);
+  return rpcD('file','exec',{command:'/bin/cat',params:['/sys/class/net/'+dev+'/statistics/'+what]})
+    .then(function(r){
+      var v=parseInt(String((r&&r.stdout)||'').trim(),10);
+      return isNaN(v)?null:v;
+    }).catch(function(){return null;});
+}
+/* GWRT 2026-10-20: CPU 占用率。
+   luci.getCPUUsage 内部执行 top -n1 加 awk 解析 BusyBox top 输出，
+   在 rpcd 环境下该 awk 无法正确解析，恒返回问号，导致框里一直是横杠。
+   改为直接读 /proc/stat 自行计算，luci 调用保留为兜底。 */
+function gwrtReadProcStatCpu(){
+  return rpcD('file','exec',{command:'/bin/cat',params:['/proc/stat']}).then(function(r){
+    var out=String((r&&r.stdout)||'');
+    var line=(out.split('\n')[0]||'').trim();
+    if(!/^cpu\s/.test(line))return null;
+    var p=line.split(/\s+/).slice(1).map(Number);
+    if(p.length<4||!p[3])return null;
+    var total=0;
+    for(var i=0;i<p.length&&i<8;i++)total+=(p[i]||0);
+    if(!total)return null;
+    var pct=Math.round(100*(1-(p[3]/total)));
+    if(isNaN(pct)||pct<0)pct=0;
+    if(pct>100)pct=100;
+    return pct;
+  }).catch(function(){return null;});
+}
+function gwrtFetchCpuUsage(){
+  return rpcD('luci','getCPUUsage').then(function(r){
+    var cs=String((r&&r.cpuusage)||'');
+    if(/\d/.test(cs))return r;
+    return gwrtReadProcStatCpu().then(function(pct){
+      return (pct===null||pct===undefined)?r:{cpuusage:pct+'%'};
+    });
+  }).catch(function(){
+    return gwrtReadProcStatCpu().then(function(pct){
+      return (pct===null||pct===undefined)?{cpuusage:'?'}:{cpuusage:pct+'%'};
+    });
+  });
+}
 var nssPrev=null;
 var refreshInFlight=null;
 
@@ -2773,7 +2816,7 @@ function refresh(){
   var dataPromise=Promise.all([
     rpcCached('systemBoard',300000,'system','board'),
     rpcD('system','info'),
-    rpcD('luci','getCPUUsage'),
+    gwrtFetchCpuUsage(),
     rpcD('luci','getTempInfo'),
     rpcD('network.interface','dump'),
     rpcCached('dhcpLeases',15000,'luci-rpc','getDHCPLeases'),
@@ -2823,7 +2866,7 @@ function refresh(){
     var fwVer=String(rel.version||rel.version_number||'').trim();
     var fwText=firmwareVersionText(fwDist+' '+fwVer);
     if(!/^gwrt\s+\d{6,8}-\d{2}$/i.test(fwText))fwText=fwFallback;
-    S('gwrtFirmware',gwrtOtaCurrentVersion||fwText);
+    S('gwrtFirmware',fwText);
 
     /* CPU usage */
     var cs=String(cu.cpuusage||'');
@@ -2921,15 +2964,17 @@ function refresh(){
     renderDhcp(leases,bdev,bOnline,ou,hh);
     refreshMacBlacklist();
 
-    /* Memory / Swap / Disk(mmc ext4) / RootFS(squashfs overlay) */
+    /* Memory / Swap / Disk(mmc ext4) / RootFS(squashfs overlay)
+       GWRT 2026-10-20: 进度条与下方数字改为同源 —— 统一显示“已用 / 总数”，
+       进度条宽度 = 已用 / 总数（此前条形是已用%、文字却是“剩余”，两者语义相反）。 */
     var mem=si.memory||{},sw=si.swap||{},rt=si.root||{};
-    var mt=mem.total||1,mf=(mem.free||0)+(mem.buffered||0)+(mem.cached||0),mp=Math.round(((mt-mf)/mt)*100);
+    var mt=mem.total||1,mf=(mem.free||0)+(mem.buffered||0)+(mem.cached||0),mUsed=Math.max(0,mt-mf),mp=Math.round((mUsed/mt)*100);
     var mb=document.getElementById('gwrtMemBar');if(mb)mb.style.width=mp+'%';
-    S('gwrtMemVal','剩余 '+F(mf)+' / '+F(mt));
+    S('gwrtMemVal',F(mUsed)+' / '+F(mt));
 
-    var st=sw.total||0,sf=sw.free||0,sp=st>0?Math.round(((st-sf)/st)*100):0;
+    var st=sw.total||0,sf=sw.free||0,sUsed=Math.max(0,st-sf),sp=st>0?Math.round((sUsed/st)*100):0;
     var sb=document.getElementById('gwrtSwapBar');if(sb)sb.style.width=sp+'%';
-    S('gwrtSwapVal',st>0?('剩余 '+F(sf)+' / '+F(st)):'-');
+    S('gwrtSwapVal',st>0?(F(sUsed)+' / '+F(st)):'-');
 
     /* DISK: mmcblk data partition mounted under /mnt */
     rpcCached('diskDf',30000,'file','exec',{command:'/bin/df',params:[]}).then(function(r){
@@ -2943,9 +2988,9 @@ function refresh(){
         }
       }
       if(best){
-        var dpp=Math.round((best.u/best.t)*100);
+        var dUsed=Math.max(0,best.u),dpp=Math.round((dUsed/best.t)*100);
         var dbar=document.getElementById("gwrtDiskBar");if(dbar)dbar.style.width=dpp+"%";
-        S("gwrtDiskVal","剩余 "+F(best.t-best.u)+" / "+F(best.t));
+        S("gwrtDiskVal",F(dUsed)+" / "+F(best.t));
       }
     }).catch(function(){});
     /* ROOTFS: overlay via si.root (no file.exec needed) */
@@ -2953,7 +2998,7 @@ function refresh(){
     if(rfsTotal>0){
       var rfp=Math.round((rfsUsed/rfsTotal)*100);
       var rbar=document.getElementById("gwrtRootfsBar");if(rbar)rbar.style.width=rfp+"%";
-      S("gwrtRootfsVal","剩余 "+F(rfsTotal-rfsUsed)+" / "+F(rfsTotal));
+      S("gwrtRootfsVal",F(rfsUsed)+" / "+F(rfsTotal));
     }
 
     /* WAN status and real-time speed */
@@ -2968,39 +3013,46 @@ function refresh(){
       var wa='';if(wi['ipv4-address']&&wi['ipv4-address'].length>0)wa=wi['ipv4-address'][0].address;
       S('gwrtWanAddr',wa||'-');
 
-      /* Real-time WAN speed via luci.getRealtimeStats */
+      /* Real-time WAN speed via luci.getRealtimeStats
+         GWRT 2026-10-20: 该方法必须带 mode 参数，否则 rpcd 直接返回
+         "Invalid mode"；返回体是 {result:[[ts,rx_bytes,rx_pps,tx_bytes,tx_pps],...]}
+         的累计计数，需要自己差分求速率（旧代码按 rx_speed/tx_speed 取值，必然取不到）。 */
       var dev=wi.l3_device||wi.device;
       if(dev){
-        rpc('luci','getRealtimeStats',{device:dev}).then(function(st){
-          if(st&&st.rx_speed!==undefined&&st.tx_speed!==undefined){
-            var dRx=st.rx_speed||0;
-            var dTx=st.tx_speed||0;
-            S('gwrtSpeed',fmtSpeed(dRx+dTx));
-            S('gwrtWanDown',fmtSpeed(dRx));
-            S('gwrtWanUp',fmtSpeed(dTx));
-          }else{
-            /* Fallback: calculate from /sys/class/net counters */
-            rpc('file','read',{path:'/sys/class/net/'+dev+'/statistics/rx_bytes'}).then(function(rxRes){
-              rpc('file','read',{path:'/sys/class/net/'+dev+'/statistics/tx_bytes'}).then(function(txRes){
-                if(rxRes&&rxRes.data&&txRes&&txRes.data){
-                  var rx=parseInt(rxRes.data)||0;
-                  var tx=parseInt(txRes.data)||0;
-                  var nnow=Date.now();
-                  if(wanPrev&&wanPrev.dev===dev){
-                    var dt2=(nnow-wanPrev.ts)/1000;
-                    if(dt2>0.2){
-                      var dRx=Math.max(0,rx-wanPrev.rx)/dt2;
-                      var dTx=Math.max(0,tx-wanPrev.tx)/dt2;
-                      S('gwrtSpeed',fmtSpeed(dRx+dTx));
-                      S('gwrtWanDown',fmtSpeed(dRx));
-                      S('gwrtWanUp',fmtSpeed(dTx));
-                    }
-                  }
-                  wanPrev={dev:dev,rx:rx,tx:tx,ts:nnow};
-                }
-              });
-            });
+        rpc('luci','getRealtimeStats',{mode:'interface',device:dev}).then(function(st){
+          var arr=(st&&st.result)||null;
+          if(Array.isArray(arr)&&arr.length>=2){
+            var a=arr[arr.length-2],b=arr[arr.length-1];
+            var dt=(b[0]-a[0])||0;
+            if(dt>0){
+              var dRx=Math.max(0,(b[1]-a[1])/dt);
+              var dTx=Math.max(0,(b[3]-a[3])/dt);
+              wanPrev={dev:dev,rx:b[1],tx:b[3],ts:Date.now()};
+              S('gwrtSpeed',fmtSpeed(dRx+dTx));
+              S('gwrtWanDown',fmtSpeed(dRx));
+              S('gwrtWanUp',fmtSpeed(dTx));
+              return;
+            }
           }
+          /* Fallback: counter delta via /bin/cat
+             注意 file.read 在本机会被 ACL 拒绝（错误码 6），只能用 file.exec /bin/cat。 */
+          gwrtCatNetCounter(dev,'rx_bytes').then(function(rx){
+            gwrtCatNetCounter(dev,'tx_bytes').then(function(tx){
+              if(rx===null||tx===null)return;
+              var nnow=Date.now();
+              if(wanPrev&&wanPrev.dev===dev){
+                var dt2=(nnow-wanPrev.ts)/1000;
+                if(dt2>0.2){
+                  var dRx=Math.max(0,rx-wanPrev.rx)/dt2;
+                  var dTx=Math.max(0,tx-wanPrev.tx)/dt2;
+                  S('gwrtSpeed',fmtSpeed(dRx+dTx));
+                  S('gwrtWanDown',fmtSpeed(dRx));
+                  S('gwrtWanUp',fmtSpeed(dTx));
+                }
+              }
+              wanPrev={dev:dev,rx:rx,tx:tx,ts:nnow};
+            });
+          });
         });
       }
     }
@@ -3011,220 +3063,6 @@ function refresh(){
     refreshInFlight=null;console.warn('Dashboard refresh:',error);return [];
   });
   return refreshInFlight;
-}
-
-function gwrtOtaJson(r){
-  if(!r||typeof r.stdout!=='string')return null;
-  try{return JSON.parse(r.stdout);}catch(e){return null;}
-}
-function gwrtOtaFlashUrl(){
-  if(typeof L!=='undefined'&&L.url){try{return L.url('admin/system/flash');}catch(e){}}
-  return '/cgi-bin/luci/admin/system/flash';
-}
-function gwrtSetOtaVersion(info){
-  if(info&&info.current_version){
-    gwrtOtaCurrentVersion=firmwareVersionText(info.current_version);
-  }
-}
-function gwrtSetFirmwareUpdate(active){
-  var el=document.getElementById('gwrtFirmware');
-  if(!el)return;
-  if(active){
-    el.classList.add('gwrt-fw-update');
-    el.style.color='var(--accent-danger)';
-    el.style.fontWeight='800';
-  }else{
-    el.classList.remove('gwrt-fw-update');
-    el.style.color='';
-    el.style.fontWeight='';
-  }
-}
-function gwrtOtaReasonTitle(info){
-  var reason=info&&info.reason||'';
-  if(reason==='disabled')return '自动更新已停用';
-  if(reason==='no_manifest_url')return '未配置 OTA manifest 地址';
-  if(reason==='feed_unavailable')return '当前机型尚未发布 OTA 清单';
-  if(reason==='channel_mismatch')return '更新频道不匹配：当前 '+(info.channel||'-')+'，清单 '+(info.manifest_channel||'-');
-  if(reason==='device_mismatch')return '固件型号不匹配：当前 '+(info.board||'-')+'，清单 '+(info.manifest_device||'-');
-  if(reason==='target_mismatch')return '固件目标不匹配：当前 '+(info.target||'-')+'，清单 '+(info.manifest_target||'-');
-  if(reason==='requires_full_upgrade')return '当前版本过旧，需要先使用完整固件升级';
-  return '已是最新版本';
-}
-function gwrtRenderOta(info){
-  var btn=document.getElementById('gwrtOtaBtn');
-  if(!btn)return;
-  gwrtOtaInfo=info||null;
-  gwrtSetFirmwareUpdate(false);
-  btn.classList.remove('gwrt-ota-full','gwrt-ota-busy','gwrt-ota-done','gwrt-ota-error','gwrt-ota-idle');
-  btn.disabled=false;
-  btn.textContent='OTA';
-  btn.onclick=null;
-  btn.removeAttribute('title');
-  btn.removeAttribute('data-version');
-  if(!info||!info.ok){
-    btn.classList.add('gwrt-ota-error');
-    btn.textContent='重试';
-    btn.title=(info&&(info.message||info.error))||'OTA 检查失败';
-    btn.onclick=function(){gwrtCheckOta(true);};
-    return;
-  }
-  gwrtSetOtaVersion(info);
-  if(!info.update){
-    var reason=info.reason||'up_to_date';
-    btn.title=gwrtOtaReasonTitle(info);
-    if(reason==='requires_full_upgrade'){
-      gwrtSetFirmwareUpdate(true);
-      btn.textContent='完整升级';
-      btn.classList.add('gwrt-ota-full');
-      btn.onclick=function(){window.location.href=gwrtOtaFlashUrl();};
-      return;
-    }
-    btn.classList.add('gwrt-ota-idle');
-    if(reason==='disabled')btn.textContent='已停用';
-    else if(reason==='feed_unavailable')btn.textContent='未发布';
-    else if(reason==='channel_mismatch'||reason==='device_mismatch'||reason==='target_mismatch')btn.textContent='不适用';
-    else if(reason==='no_manifest_url'){
-      btn.textContent='未配置';
-      btn.classList.remove('gwrt-ota-idle');
-      btn.classList.add('gwrt-ota-error');
-    }else btn.textContent='最新';
-    btn.onclick=function(){gwrtToast(btn.title,reason==='no_manifest_url'?'error':'success');};
-    return;
-  }
-  gwrtSetFirmwareUpdate(true);
-  btn.dataset.version=info.version||'';
-  btn.title=(info.version?info.version+' · ':'')+(info.notes||'');
-  if(info.manual_only||!info.type||(info.type!=='patch'&&info.type!=='sysupgrade')){
-    btn.textContent='手动';
-    btn.classList.add('gwrt-ota-full');
-    btn.title='此更新需要手动安装'+(info.version?' · '+info.version:'');
-    btn.onclick=function(){window.location.href=gwrtOtaFlashUrl();};
-  }else if(info.type==='patch'){
-    btn.textContent='更新';
-    btn.onclick=gwrtApplyOta;
-  }else{
-    btn.textContent='完整升级';
-    btn.classList.add('gwrt-ota-full');
-    btn.onclick=function(){gwrtApplyFullOta(info);};
-  }
-}
-function gwrtCheckOta(force){
-  if(gwrtOtaChecking||(gwrtOtaChecked&&!force))return;
-  gwrtOtaChecked=true;
-  gwrtOtaChecking=true;
-  var btn=document.getElementById('gwrtOtaBtn');
-  if(btn){
-    btn.disabled=true;
-    btn.textContent='检查中';
-    btn.classList.remove('gwrt-ota-full','gwrt-ota-done','gwrt-ota-error','gwrt-ota-idle');
-    btn.classList.add('gwrt-ota-busy');
-  }
-  rpcD('file','exec',{command:'/usr/libexec/gwrt-ota',params:['status']}).then(function(r){
-    gwrtSetOtaVersion(gwrtOtaJson(r));
-  }).catch(function(){});
-  rpcD('file','exec',{command:'/usr/libexec/gwrt-ota',params:['check']}).then(function(r){
-    gwrtOtaChecking=false;
-    gwrtRenderOta(gwrtOtaJson(r));
-  }).catch(function(){gwrtOtaChecking=false;gwrtRenderOta(null);});
-}
-function gwrtApplyOta(){
-  var btn=document.getElementById('gwrtOtaBtn');
-  if(!btn||gwrtOtaApplying)return;
-  if(!window.confirm('确定执行 OTA 小补丁更新？'))return;
-  gwrtOtaApplying=true;
-  btn.disabled=true;
-  btn.textContent='更新中';
-  btn.classList.remove('gwrt-ota-error','gwrt-ota-idle','gwrt-ota-done');
-  btn.classList.add('gwrt-ota-busy');
-  rpcD('file','exec',{command:'/usr/libexec/gwrt-ota',params:['apply']}).then(function(r){
-    var info=gwrtOtaJson(r);
-    gwrtOtaApplying=false;
-    btn.disabled=false;
-    btn.classList.remove('gwrt-ota-busy');
-    if(info&&info.ok&&info.applied){
-      if(info.version){
-        gwrtOtaCurrentVersion=firmwareVersionText(info.version);
-        S('gwrtFirmware',gwrtOtaCurrentVersion);
-      }
-      gwrtSetFirmwareUpdate(false);
-      btn.textContent=info.reboot?'重启中':'已更新';
-      btn.classList.add('gwrt-ota-done');
-      btn.onclick=null;
-      if(info.reboot){
-        btn.disabled=true;
-        gwrtToast('OTA 更新完成，路由正在重启','success');
-      }else{
-        gwrtToast('OTA 更新完成','success');
-        setTimeout(function(){window.location.reload();},4000);
-      }
-      return;
-    }
-    btn.textContent='重试';
-    btn.classList.add('gwrt-ota-error');
-    btn.title=(info&&(info.message||info.error))||'OTA 更新失败';
-    btn.onclick=gwrtApplyOta;
-    gwrtToast(btn.title,'error');
-  }).catch(function(){
-    gwrtOtaApplying=false;
-    btn.disabled=false;
-    btn.textContent='重试';
-    btn.classList.add('gwrt-ota-error');
-    btn.title='OTA 更新失败';
-    btn.onclick=gwrtApplyOta;
-    gwrtToast('OTA 更新失败','error');
-  });
-}
-function gwrtApplyFullOta(info){
-  var btn=document.getElementById('gwrtOtaBtn');
-  if(!btn||gwrtOtaApplying)return;
-  info=info||gwrtOtaInfo||{};
-  var reset=!!info.reset_required||info.keep_config===false;
-  var msg='将下载完整 sysupgrade 固件并升级，升级过程中路由会断网并重启。';
-  msg+='\n\n版本：'+(info.version||'-');
-  msg+='\n配置：'+(reset?'本次升级会重置配置':'默认保留当前配置');
-  msg+='\n校验：下载后会先验证型号和镜像完整性';
-  msg+='\n\n确定继续？';
-  if(!window.confirm(msg))return;
-  gwrtOtaApplying=true;
-  btn.disabled=true;
-  btn.textContent='下载中';
-  btn.classList.remove('gwrt-ota-error','gwrt-ota-idle','gwrt-ota-done');
-  btn.classList.add('gwrt-ota-busy');
-  rpcD('file','exec',{command:'/usr/libexec/gwrt-ota',params:['apply']}).then(function(r){
-    var res=gwrtOtaJson(r);
-    gwrtOtaApplying=false;
-    btn.classList.remove('gwrt-ota-busy');
-    if(res&&res.ok&&res.queued){
-      btn.disabled=true;
-      btn.textContent='等待重启';
-      btn.classList.add('gwrt-ota-done');
-      gwrtToast('完整固件升级已开始，等待路由重启','success');
-      return;
-    }
-    if(!res){
-      btn.disabled=true;
-      btn.textContent='状态未知';
-      btn.classList.add('gwrt-ota-error');
-      btn.title='连接已中断，升级可能已经开始，请勿断电并等待路由重启';
-      gwrtToast(btn.title,'error');
-      return;
-    }
-    btn.disabled=false;
-    btn.textContent=res.error==='image_check_failed'?'手动':'重试';
-    btn.classList.add('gwrt-ota-error');
-    btn.title=(res&&(res.message||res.error))||'完整固件升级失败';
-    btn.onclick=res.error==='image_check_failed'
-      ?function(){window.location.href=gwrtOtaFlashUrl();}
-      :function(){gwrtApplyFullOta(info);};
-    gwrtToast(btn.title,'error');
-  }).catch(function(){
-    gwrtOtaApplying=false;
-    btn.disabled=true;
-    btn.textContent='状态未知';
-    btn.classList.add('gwrt-ota-error');
-    btn.title='连接已中断，升级可能已经开始，请勿断电并等待路由重启';
-    gwrtToast(btn.title,'error');
-  });
 }
 
 /* 内核堆栈续行识别：一条 WARNING 会打 30~40 行 trace，逐行计数会让卡片数字虚高 */
@@ -3292,14 +3130,14 @@ function refreshLogs(){
 var dashboardRefreshTimer=null,logRefreshTimer=null,dashboardStopped=false;
 function scheduleDashboardRefresh(delay){
   clearTimeout(dashboardRefreshTimer);
-  if(dashboardStopped||document.hidden)return;
+  if(dashboardStopped||window.dashboardPaused||document.hidden)return;
   dashboardRefreshTimer=setTimeout(function(){
     refresh().then(function(){scheduleDashboardRefresh(3000);});
   },delay);
 }
 function scheduleLogRefresh(delay){
   clearTimeout(logRefreshTimer);
-  if(dashboardStopped||document.hidden)return;
+  if(dashboardStopped||window.dashboardPaused||document.hidden)return;
   logRefreshTimer=setTimeout(function(){
     refreshLogs().then(function(){scheduleLogRefresh(30000);});
   },delay);
@@ -3324,6 +3162,7 @@ var GWRT_ICON_SVG={
   wireless:'<path d="M5 12.55a11 11 0 0 1 14.08 0"/><path d="M1.42 9a16 16 0 0 1 21.16 0"/><path d="M8.53 16.11a6 6 0 0 1 6.95 0"/><line x1="12" y1="20" x2="12.01" y2="20"/>',
   firewall:'<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>',
   dns:'<circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/>',
+  'dns-rescue':'<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M9 11.5l2 2 4-4"/>',
   dhcp:'<rect x="2" y="2" width="20" height="8" rx="2" ry="2"/><rect x="2" y="14" width="20" height="8" rx="2" ry="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/>',
   turboacc:'<polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>',
   bandix_plus:'<path d="M12 20V10"/><path d="M18 20V4"/><path d="M6 20v-4"/>',
@@ -3366,6 +3205,7 @@ var GWRT_ICON_SVG={
   'wol-plus':'<path d="M18.36 6.64a9 9 0 1 1-12.72 0"/><path d="M12 2v10"/>',
   athena_led:'<circle cx="5" cy="5" r="1"/><circle cx="12" cy="5" r="1"/><circle cx="19" cy="5" r="1"/><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="19" r="1"/><circle cx="12" cy="19" r="1"/><circle cx="19" cy="19" r="1"/>',
   eqos:'<path d="M4 18a8 8 0 1 1 16 0"/><path d="M12 14l4-5"/><circle cx="12" cy="14" r="1"/>',
+  gecoosac:'<rect x="2" y="14" width="20" height="8" rx="2"/><circle cx="6.5" cy="18" r="1"/><circle cx="10.5" cy="18" r="1"/><path d="M12 2v5"/><path d="M8.5 4.5a5 5 0 0 1 7 0"/><path d="M6 2a8.5 8.5 0 0 1 12 0"/>',
   'mini-diskmanager':'<rect x="3" y="7" width="18" height="10" rx="2"/><circle cx="16.5" cy="12" r="1"/><path d="M7 12h.01"/>'
 };
 var GWRT_ICON_IMG={
@@ -3436,6 +3276,10 @@ function gwrtGridDefs(menu,hasTtyd){
   var netChildren=net?gwrtMenuChildren(net):[];
   var vpnNet=netChildren.filter(function(n){return n.name==='vpn'||/^vpn$/i.test(String(n.title||''));})[0];
   var netItems=netChildren.filter(function(n){return n!==vpnNet;}).map(function(n){return gwrtLeaf(n,['admin','network']);});
+  netItems.push({name:'dns-rescue',title:'DNS 急救',icon:'dns-rescue',href:'#dns-rescue'});
+  // Control 分类（如 GECOOS AC 无线控制器）：仪表盘没有 Control 分区，归入"网络"
+  var ctl=byName['control'];
+  if(ctl)gwrtMenuChildren(ctl).forEach(function(n){netItems.push(gwrtLeaf(n,['admin','control']));});
   var svcItems=svc?gwrtMenuChildren(svc).map(function(n){return gwrtLeaf(n,['admin','services']);}):[];
   function addVpnItems(node,path,prefix){
     if(!node)return;
@@ -3568,7 +3412,9 @@ function gwrtRenderGrid(gridEl,items,key){
   gridEl.querySelectorAll('.icon-item').forEach(function(t){
     t.addEventListener('click',function(){
       if(t._gwrtJustDragged)return;
-      gwrtOpenModal(t.getAttribute('data-href'),t.getAttribute('data-title')||t.title||'');
+      var href=t.getAttribute('data-href');
+      if(href==='#dns-rescue'){gwrtDnsRescue();return;}
+      gwrtOpenModal(href,t.getAttribute('data-title')||t.title||'');
     });
   });
   gwrtSetupGrid(gridEl,key);
@@ -3669,6 +3515,11 @@ function gwrtModalSyncActions(){
   gwrtModalEl.querySelector('.gwrt-modal-reset').style.display=has('.cbi-button-reset')||has('input[name="cbi.reset"]')?'':'none';
 }
 function gwrtOpenModal(href,title){
+  /* GWRT: pause the 3s dashboard polling while a plugin modal is open -
+     the iframe page is heavy enough on low-end clients; background DOM
+     rebuilds behind the modal only add repaint cost. */
+  window.dashboardPaused=true;
+  clearTimeout(dashboardRefreshTimer);clearTimeout(logRefreshTimer);
   if(!gwrtModalEl){
     gwrtModalEl=document.createElement('div');
     gwrtModalEl.className='gwrt-modal';
@@ -3731,6 +3582,7 @@ function gwrtOpenModal(href,title){
 function gwrtCloseModal(){
   if(!gwrtModalEl)return;
   gwrtModalEl.classList.remove('open');
+  if(window.dashboardPaused){window.dashboardPaused=false;try{resumeDashboard();}catch(e){}}
   var f=gwrtModalEl.querySelector('iframe');
   if(f)setTimeout(function(){if(f.parentNode)f.remove();},200);
   var l=gwrtModalEl.querySelector('.gwrt-modal-loading');
@@ -4010,6 +3862,43 @@ function gwrtContainerFormatKiB(value){
 }
 function gwrtContainerSession(){return (typeof L!=='undefined'&&L.env&&L.env.sessionid)?L.env.sessionid:'';}
 function gwrtContainerApiUrl(){return '/cgi-bin/gwrt-container?sid='+encodeURIComponent(gwrtContainerSession());}
+/* ── DNS 急救：清理 DNS/代理插件退出后的残留，恢复系统默认解析 ── */
+function gwrtDnsRescue(){
+  if(!window.confirm('DNS 急救：\n清理 DNS/代理插件退出后的残留（resolv 劫持挂载、dnsmasq 上游残留、死重定向规则），并重启 dnsmasq 恢复默认解析。\n\n继续？'))return;
+  gwrtToast('正在修复 DNS…','success');
+  fetch('/cgi-bin/gwrt-dns-rescue?sid='+encodeURIComponent(gwrtContainerSession()),{cache:'no-store'}).then(function(r){
+    if(!r.ok)throw new Error('HTTP '+r.status);
+    return r.json();
+  }).then(function(res){
+    if(!res||typeof res!=='object')throw new Error('响应异常');
+    gwrtDnsRescueResult(res);
+  }).catch(function(e){
+    gwrtToast('DNS 急救失败: '+((e&&e.message)||e),'error');
+  });
+}
+function gwrtDnsRescueResult(res){
+  var overlay=document.createElement('div');
+  overlay.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.55);backdrop-filter:blur(4px);z-index:10000;display:flex;align-items:center;justify-content:center;animation:gwrtFadeIn .2s ease';
+  var panel=document.createElement('div');
+  panel.className='gwrt-settings-panel';
+  var rows='';
+  (res.actions||[]).forEach(function(a){rows+='<div style="padding:3px 0">✅ '+esc(a)+'</div>';});
+  (res.warnings||[]).forEach(function(w){rows+='<div style="padding:3px 0;color:var(--accent-warning,#d97706)">⚠️ '+esc(w)+'</div>';});
+  if(!rows)rows='<div style="padding:3px 0;color:var(--text-tertiary)">无需修复，DNS 状态本来就正常</div>';
+  panel.innerHTML='<div class="gwrt-sf-header">'
+    +'<div style="display:flex;align-items:center;gap:8px"><span style="font-size:20px">🩺</span><h3 style="margin:0;font-size:16px;color:var(--text-primary)">DNS 急救</h3></div>'
+    +'<button id="gwrtDnsRescueClose" class="gwrt-sf-close">✕</button></div>'
+    +'<div style="padding:10px 16px 16px;font-size:13px;line-height:1.8">'
+    +'<div style="margin-bottom:6px;font-weight:700;color:'+(res.ok?'var(--accent-secondary)':'var(--accent-danger)')+'">'+(res.ok?'修复完成，DNS 正常':'修复后解析仍异常')+'</div>'
+    +rows
+    +'<div style="margin-top:10px;color:var(--text-tertiary)">自检：'+esc(res.test||'—')+'</div>'
+    +'</div>';
+  overlay.appendChild(panel);
+  document.body.appendChild(overlay);
+  var close=function(){if(overlay.parentNode)overlay.parentNode.removeChild(overlay);};
+  document.getElementById('gwrtDnsRescueClose').onclick=close;
+  overlay.onclick=function(e){if(e.target===overlay)close();};
+}
 function gwrtContainerFetch(){
   if(gwrtContainerLoadPending)return gwrtContainerLoadPending;
   gwrtContainerLoadPending=fetch(gwrtContainerApiUrl(),{cache:'no-store'}).then(function(r){
@@ -4393,7 +4282,6 @@ if(document.getElementById('gwrtHostname')){
     gwrtOpenDeviceLabel(t.getAttribute('data-gwrt-label-mac'));
   });
   resumeDashboard();
-  gwrtCheckOta();
   document.addEventListener('visibilitychange',function(){
     if(document.hidden){clearTimeout(dashboardRefreshTimer);clearTimeout(logRefreshTimer);}
     else resumeDashboard();

@@ -1,0 +1,38 @@
+#!/bin/sh
+# 40b_gwrt-wifi-htmode — 2.4G 频段退回 HT20（兼容性修复）
+#
+# 2026-10-20 真机实测（亚瑟 ss-01, 261018-01）：
+#   2.4G 用 HE20 时，部分客户端（实测 Intel AX 无线网卡）只能协商到
+#   HE-MCS 0 = 3.6 Mbit/s，iperf3 实测仅 437 Kbit/s。
+#   改回 HT20 后同一客户端协商 HT MCS15 = 144.4 Mbit/s，
+#   iperf3 实测 87.8 Mbit/s（提升约 200 倍）。
+#
+#   原因：2.4G HE20 在部分网卡/驱动组合上速率协商异常退化，
+#   而 2.4G 的实际可用带宽（40MHz 信道）本就不大，HT20 已足够。
+#
+# 原则：
+#   - 只在当前为 HE20 / HE40 时下调为 HT20；用户手动设的 HT* 不动
+#   - 5G 频段保持 HE80 不动（实测 565 Mbit/s，HE 正常）
+#   - 首启执行一次，用户后续可自行改回
+. /lib/functions/gwrt-wireless.sh
+# 2026-10-21: 包升级重装会重跑 uci-defaults —— once-marker 保证只生效一次（恢复出厂后重跑）
+[ -e /etc/gwrt/wifi-htmode.once ] && exit 0
+
+changed=0; seen=0
+for radio in $(uci -q show wireless | sed -n "s/^wireless\.\(radio[0-9]*\)=.*/\1/p"); do
+	band=$(uci -q get wireless.$radio.band)
+	[ "$band" = "2g" ] || continue
+	seen=1
+	cur=$(uci -q get wireless.$radio.htmode)
+	case "$cur" in
+		HE20|HE40)
+			uci set wireless.$radio.htmode="HT20"
+			logger -t 40b_gwrt-wifi-htmode "$radio(2.4G) htmode $cur -> HT20 (兼容性修复)"
+			changed=1
+			;;
+	esac
+done
+[ "$changed" = "1" ] && uci commit wireless
+# 只有真的看到 2g radio 才落 once 标记（空跑落标记 = 以后不再修；261021-01 真机教训）
+[ "$seen" = "1" ] && { mkdir -p /etc/gwrt && touch /etc/gwrt/wifi-htmode.once; }
+exit 0

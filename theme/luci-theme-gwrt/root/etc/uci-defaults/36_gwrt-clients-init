@@ -8,7 +8,7 @@ if [ -x /etc/init.d/gwrt-clients ]; then
 	/etc/init.d/gwrt-clients start  2>/dev/null
 fi
 
-# 凌晨 0:00 cron: 清离线条目 + drop_caches
+# 凌晨 0:00 cron: 清离线条目（2026-10-09 起不再 drop_caches，保护 NSS/PPE 加速）
 CRON_FILE=/etc/crontabs/root
 mkdir -p /etc/crontabs
 touch "$CRON_FILE"

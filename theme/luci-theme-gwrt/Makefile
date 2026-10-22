@@ -5,7 +5,16 @@ LUCI_DEPENDS:=+luci-base
 
 PKG_NAME:=luci-theme-gwrt
 PKG_VERSION:=1.0
-PKG_RELEASE:=94
+PKG_RELEASE:=110
+
+# GWRT 2026-10-18: modal diet - default 880x76vh, drop backdrop-filter jank,
+# pause 3s dashboard polling while a plugin modal is open.
+
+# GWRT 2026-10-04: disable css minify for this package.
+# csstidy 1.3 (2005) cannot parse color-mix() in gwrtDevFlash keyframes and
+# silently truncates the css at that point, dropping ~4.5KB of trailing rules
+# (incl. the layer-3 modal convention). +10KB uncompressed is acceptable.
+LUCI_MINIFY_CSS:=0
 PKG_MAINTAINER:=GWRT
 PKG_LICENSE:=Apache-2.0
 

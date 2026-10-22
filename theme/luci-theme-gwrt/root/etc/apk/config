@@ -1,0 +1,6 @@
+# GWRT 2026-10-21：apk 默认网络超时
+# 背景：apk-tools 3.0.5 默认无网络超时，网络慢/不通时 apk add/update 会挂在
+# do_sys_poll 上并一直占着包数据库锁 -> 后续所有 apk 命令报
+#   "Unable to lock database: Resource temporarily unavailable"
+# 真机（cs-07）实测：语法是 "timeout 30"（空格、无 --、无 =）
+timeout 30

@@ -1,5 +1,7 @@
 #!/bin/sh
 # GWRT: aria2 优化 —— 下载目录落到数据分区 downloads/aria2，并启用加速源
+# 2026-10-21: 包升级重装会重跑 uci-defaults —— once-marker 保证只生效一次（恢复出厂后重跑）
+[ -e /etc/gwrt/aria2-setup.once ] && exit 0
 DL="$(uci -q get gwrt.downloads_dir)"
 [ -n "$DL" ] || DL=/mnt/storage/downloads
 ARIA_DIR="$DL/aria2"
@@ -38,4 +40,5 @@ EOF
 
 /etc/init.d/aria2 restart 2>/dev/null
 logger -t 41_gwrt-aria2 "aria2 已配置 dir=$ARIA_DIR rpc=6800 加速源已写入 /etc/gwrt/mirrors.conf"
+mkdir -p /etc/gwrt && touch /etc/gwrt/aria2-setup.once
 exit 0

@@ -412,8 +412,9 @@ do_cleanup_daily() {
 	cp "$RUNTIME" "$PERSIST"
 	echo $(date +%s) > /tmp/gwrt-clients.flushed
 
-	# 顺手清内存缓存
-	sync && echo 3 > /proc/sys/vm/drop_caches 2>/dev/null
+	# 2026-10-09: 不再 drop_caches —— 每天把 page cache 清空对开启
+	# NSS/PPE 硬件加速的路由是性能杀手（转发路径首包全 miss）。
+	# sync 已在写 PERSIST 后隐式完成，无需额外动作。
 }
 
 # === dump: 输出当前 JSON ===

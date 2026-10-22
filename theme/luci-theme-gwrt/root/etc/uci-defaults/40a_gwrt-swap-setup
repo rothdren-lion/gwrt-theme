@@ -1,0 +1,95 @@
+#!/bin/sh
+# GWRT: 首次刷机自动启用 swap 分区（blkid -t TYPE=swap 自动探测）
+#
+# 语义（2026-10-09 用户确定）：
+#   - 自动找 TYPE=swap 的分区 -> 写入 /etc/config/fstab 并立即启用
+#   - 找不到 swap 分区 -> 什么都不做（不建 swapfile、不报错）
+# uci-defaults 只在首刷/恢复出厂后运行一次，用户之后的手工改动不受影响。
+# 2026-10-21: 包升级重装会重跑 uci-defaults —— once-marker 保证只生效一次（恢复出厂后重跑）
+[ -e /etc/gwrt/swap-setup.once ] && exit 0
+
+swap_dev=""
+
+# ① fstools 的 block info（uci/ubus 环境，最可靠）
+if command -v block >/dev/null 2>&1; then
+	swap_dev=$(block info 2>/dev/null | sed -n 's/^\(\/dev\/[^: ]*\):.*TYPE="swap".*/\1/p' | head -n1)
+fi
+# zram 由 zram-swap 包自己管，不写进 fstab
+case "$swap_dev" in *zram*) swap_dev="" ;; esac
+
+# ② blkid 一步式
+if [ -z "$swap_dev" ] && command -v blkid >/dev/null 2>&1; then
+	swap_dev=$(blkid -t TYPE=swap -o device 2>/dev/null | grep -v zram | head -n1)
+fi
+case "$swap_dev" in *zram*) swap_dev="" ;; esac
+
+# ③ 逐个块设备用 blkid 查 TYPE（busybox 兼容）
+if [ -z "$swap_dev" ] && command -v blkid >/dev/null 2>&1; then
+	for d in /dev/mmcblk*p* /dev/sd*[0-9]* /dev/nvme*n*p* /dev/vd*[0-9]*; do
+		[ -b "$d" ] || continue
+		case "$(blkid -s TYPE -o value "$d" 2>/dev/null)" in
+			swap) swap_dev="$d"; break ;;
+		esac
+	done
+fi
+
+# ④ GPT 分区名含 "swap"（厂家布局命名；未格式化的空白分区也认）
+#    2026-10-21 真机：cs-07 的 p26 名为 "swap" 但从未 mkswap（全零）-> 前面都探测不到
+if [ -z "$swap_dev" ]; then
+	for d in /dev/mmcblk*p* /dev/sd*[0-9]* /dev/nvme*n*p* /dev/vd*[0-9]*; do
+		[ -b "$d" ] || continue
+		nm=$(sed -n 's/^PARTNAME=//p' "/sys/class/block/$(basename "$d")/uevent" 2>/dev/null)
+		case "$nm" in
+			*swap*|*SWAP*)
+				case "$(blkid -s TYPE -o value "$d" 2>/dev/null)" in
+					'') swap_dev="$d"; break ;;   # 空白分区：待 mkswap
+					swap) swap_dev="$d"; break ;;
+				esac
+				;;
+		esac
+	done
+fi
+
+if [ -z "$swap_dev" ]; then
+	logger -t 40a_gwrt-swap "未发现 swap 分区，跳过"
+	exit 0
+fi
+
+# 空白 swap 分区先 mkswap（仅在 blkid 完全认不出文件系统时，保证不毁数据）
+cur_type=$(blkid -s TYPE -o value "$swap_dev" 2>/dev/null)
+if [ "$cur_type" != "swap" ]; then
+	if [ -z "$cur_type" ]; then
+		if command -v mkswap >/dev/null 2>&1 && mkswap "$swap_dev" >/dev/null 2>&1; then
+			logger -t 40a_gwrt-swap "空白 swap 分区已 mkswap: $swap_dev"
+		else
+			logger -t 40a_gwrt-swap "mkswap 失败: $swap_dev"
+			exit 0
+		fi
+	else
+		logger -t 40a_gwrt-swap "跳过 $swap_dev（已有文件系统: $cur_type）"
+		exit 0
+	fi
+fi
+
+# 写入 fstab（先清掉旧的 swap 段，避免重复）
+# 2026-10-21 修复：`uci set fstab.@swap[0]=swap` 不会创建新段（静默失败）→
+# 改用 uci add + @swap[-1]；真机验证：重启后 swap 自动启用
+while uci -q get fstab.@swap[0] >/dev/null 2>&1; do
+	uci -q delete fstab.@swap[0]
+done
+uci -q add fstab swap >/dev/null 2>&1
+uci -q set fstab.@swap[-1].device="$swap_dev"
+uci -q set fstab.@swap[-1].enabled='1'
+uci -q set fstab.@swap[-1].priority='0'
+uci -q commit fstab
+if ! uci -q get fstab.@swap[0].device >/dev/null 2>&1; then
+	logger -t 40a_gwrt-swap "fstab swap 段写入失败: $swap_dev"
+fi
+
+/etc/init.d/fstab enable 2>/dev/null
+swapon "$swap_dev" 2>/dev/null || true
+
+# 守卫：避免 device 未生效时 fstab 反复重试
+logger -t 40a_gwrt-swap "swap 已启用: $swap_dev"
+mkdir -p /etc/gwrt && touch /etc/gwrt/swap-setup.once
+exit 0

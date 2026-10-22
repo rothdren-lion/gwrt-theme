@@ -38,6 +38,11 @@
 		</div>
 
 		<div class="login-card-body">
+			<!-- GWRT: login-time UI switcher - [登录 GWRT 界面][登录原生界面] (native = port 81/444) -->
+			<div id="gwrt-ui-switch" style="display:none;gap:8px;margin-bottom:16px">
+				<a id="gwrt-ui-switch-gwrt" class="cbi-button" style="flex:1;justify-content:center;opacity:.55" href="#">登录 GWRT 界面</a>
+				<a id="gwrt-ui-switch-native" class="cbi-button" style="flex:1;justify-content:center" href="#">登录原生界面</a>
+			</div>
 			<form method="post" action="{{ http.getenv('REQUEST_URI') }}">
 				{%- if (fuser): %}
 				<div class="errorbox">{{ _('Invalid username and/or password! Please try again.') }}</div>
@@ -63,6 +68,7 @@
 				var input = document.getElementsByName('luci_password')[0];
 				if (input) input.focus();
 			//]]></script>
+			<script>try{(function(){var p=location.port||(location.protocol==='https:'?'443':'80');if(p!=='80'&&p!=='443')return;var box=document.getElementById('gwrt-ui-switch');if(!box)return;var secure=(p==='443');var base=(secure?'https':'http')+'://'+location.hostname;var tail=location.pathname+location.search+location.hash;document.getElementById('gwrt-ui-switch-gwrt').setAttribute('href',base+tail);document.getElementById('gwrt-ui-switch-native').setAttribute('href',base+':'+(secure?'444':'81')+tail);box.style.display='flex';})();}catch(e){}</script>
 		</div>
 	</div>
 </div>

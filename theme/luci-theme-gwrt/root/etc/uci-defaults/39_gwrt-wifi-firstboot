@@ -1,0 +1,177 @@
+#!/bin/sh
+# 39_gwrt-wifi-firstboot — 首启兜底（WiFi + kixdns 配置自检）
+#
+# ⚠⚠ 绝对不要在本脚本里 rmmod ath11k_ahb / ath11k ⚠⚠
+#
+# 2026-10-17 血泪教训（真机 261011-09 变砖，串口日志实锤）：
+#   首启时 ath11k 还没拿到 cal-ahb-c000000.wifi.bin，QMI 请求超时：
+#       ath11k c000000.wifi: qmi failed to load CAL data file:cal-ahb-c000000.wifi.bin
+#       ath11k c000000.wifi: failed to load board data file: -110   (ETIMEDOUT)
+#       ath11k c000000.wifi: qmi failed to send wlan mode off: -22 (EINVAL)
+#   此时 driver 处于"半死"状态（CE ring 已分配但 firmware 没跑起来）。
+#   这时候 rmmod ath11k_ahb 会走到：
+#       ath11k_ahb_remove → ath11k_core_deinit → ath11k_ce_alloc_pipes
+#         → ath11k_hal_srng_access_begin → 读虚拟地址 0
+#   → Internal error: Oops: 0000000096000005 [#1] SMP
+#   → 机器重启 → 脚本再跑 → 再 rmmod → 再崩  = 红灯闪→灭→闪 的死循环。
+#
+#   也就是说：旧版 -08 里那个 `[ -x 38... ]` 的死代码反而"更安全"，
+#   因为它压根没执行到 rmmod 这条路径；而我把它修活之后，反而把这条
+#   必崩的路径放出来了。这是我的错，不是你的机器的问题。
+#
+# 本脚本现在的原则：**只加不减**。
+#   - 模块没加载 → modprobe（additive，安全）
+#   - 模块已加载但没 phy → 干等，不碰模块
+#   - 任何情况下都不 rmmod
+[ -x /sbin/wifi ] || exit 0
+. /lib/functions/gwrt-wireless.sh
+
+TAG=39_gwrt-wifi-firstboot
+
+have_phy() { ls /sys/class/net/ 2>/dev/null | grep -q "^phy"; }
+have_radio_section() { uci -q show wireless 2>/dev/null | grep -q "^wireless\.radio[0-9]*="; }
+ath11k_loaded() { grep -q '^ath11k_ahb ' /proc/modules 2>/dev/null; }
+ath11k_module_exists() { ls /lib/modules/*/ath11k_ahb.ko >/dev/null 2>&1; }
+
+# 2.4G HE20/HE40 -> HT20（40b 的"晚到版"：首启时 40b 在 ~20s 跑，
+# 那时 wireless 配置还没生成 → 空跑；这里在配置生成后补一次）
+# 261021-01 真机教训：不补的话 2.4G 停在 HE20，部分网卡协商退化到 MCS0。
+fix_htmode_2g() {
+	local radio band cur
+	for radio in $(uci -q show wireless 2>/dev/null | sed -n "s/^wireless\.\(radio[0-9]*\)=.*/\1/p"); do
+		band=$(uci -q get wireless.$radio.band)
+		[ "$band" = "2g" ] || continue
+		cur=$(uci -q get wireless.$radio.htmode)
+		case "$cur" in
+		HE20|HE40)
+			uci -q set wireless.$radio.htmode=HT20
+			uci -q commit wireless
+			logger -t $TAG "$radio(2.4G) htmode $cur -> HT20 (兼容性修复)"
+			;;
+		esac
+	done
+}
+
+if ! have_phy; then
+	# ---- 时序背景（261011-10 真机实测）----
+	# uci-defaults 在 ~20s 执行，而本机 ath11k 要到 ~130s 才出 phy：
+	#   26s  ath11k 加载并 request_firmware(cal-ahb-...)
+	#   90s  wcnss 起来 → hotplug 才从 0:ART 提取 caldata
+	#   132s phy0-ap0 / phy1-ap0 才出现
+	# 所以在这个脚本里同步等待是等不到的（40s 远远不够），而且会把本脚本
+	# 拖成 exit 1 一直赖在 /etc/uci-defaults 不走。
+	#
+	# 改为：把整段兜底放进后台 subshell，本脚本立刻 exit 0 被删除，
+	# 由后台去等 180s。caldata 一落盘、firmware 重试成功，phy 就会出现。
+	# 注意后台只做 modprobe / 等 / 生成配置 / reload，全程不 rmmod。
+	(
+		if ! ath11k_loaded; then
+			if ath11k_module_exists; then
+				logger -t $TAG "no phy and ath11k_ahb not loaded, modprobe (additive, no rmmod)"
+				modprobe ath11k_ahb 2>/dev/null
+			else
+				logger -t $TAG "FATAL: ath11k_ahb.ko not present in /lib/modules - kmod-ath11k-ahb missing or flash failed; reflash required"
+			fi
+		else
+			logger -t $TAG "ath11k_ahb loaded, no phy yet (caldata/firmware still coming up)"
+		fi
+
+		# 最长等 ~180s。只等，不动模块。
+		i=0
+		while [ $i -lt 36 ] && ! have_phy; do
+			sleep 5
+			i=$((i + 1))
+		done
+
+		if have_phy; then
+			if ! have_radio_section; then
+				logger -t $TAG "phy appeared, generating wireless config"
+				/sbin/wifi config 2>/dev/null
+				sleep 2
+			fi
+			# 信道默认值：38 早就跑过并自删了，这里补跑一次
+			if [ -f /etc/uci-defaults/38_gwrt-wifi-channel ]; then
+				sh /etc/uci-defaults/38_gwrt-wifi-channel 2>/dev/null
+			else
+				. /lib/functions/gwrt-wireless.sh 2>/dev/null
+				for radio in $(uci -q show wireless 2>/dev/null | sed -n "s/^wireless\.\(radio[0-9]*\)=.*/\1/p"); do
+					path=$(uci -q get wireless.$radio.path)
+					band=$(uci -q get wireless.$radio.band)
+					role=$(gwrt_wifi_role "$path" "$band" 2>/dev/null)
+					case "$role" in
+					5.8G) uci -q set wireless.$radio.channel=149; uci -q commit wireless; logger -t $TAG "$radio 5.8G channel -> 149" ;;
+					5.2G) uci -q set wireless.$radio.channel=36;  uci -q commit wireless; logger -t $TAG "$radio 5.2G channel -> 36" ;;
+					esac
+				done
+			fi
+			# 2.4G HT20 兼容性修复（40b 早跑空转的补救）
+			fix_htmode_2g
+			wifi reload 2>/dev/null
+			logger -t $TAG "wifi ok: $(ls /sys/class/net/ | grep -c '^phy') phy"
+		else
+			logger -t $TAG "wifi still unavailable after 180s (no rmmod attempted); a reboot may help"
+		fi
+	) >/dev/null 2>&1 &
+
+	# kixdns 配置自检 + 本脚本立刻交付，让 uci-defaults 把我们删掉，
+	# 免得长期占位。
+	if [ -f /etc/kixdns/pipeline.json ] && ! jsonfilter -i /etc/kixdns/pipeline.json -e @.settings >/dev/null 2>&1; then
+		if [ -f /rom/etc/kixdns/pipeline.json ]; then
+			cp /rom/etc/kixdns/pipeline.json /etc/kixdns/pipeline.json
+			logger -t $TAG "pipeline.json invalid, restored from /rom"
+		fi
+	fi
+
+	logger -t $TAG "deferred wifi fallback to background (waits up to 180s); this script will be removed"
+	exit 0
+fi
+
+if have_phy && ! have_radio_section; then
+	logger -t $TAG "generating wireless config"
+	/sbin/wifi config 2>/dev/null
+	sleep 2
+	fix_htmode_2g
+fi
+
+# kixdns 配置自检：非法 JSON → 从 /rom 恢复
+if [ -f /etc/kixdns/pipeline.json ] && ! jsonfilter -i /etc/kixdns/pipeline.json -e @.settings >/dev/null 2>&1; then
+	if [ -f /rom/etc/kixdns/pipeline.json ]; then
+		cp /rom/etc/kixdns/pipeline.json /etc/kixdns/pipeline.json
+		logger -t $TAG "pipeline.json invalid, restored from /rom"
+	fi
+fi
+
+# ==== 以下是「phy 已经在」时的同步快路径 ====
+
+if have_phy && ! have_radio_section; then
+	logger -t $TAG "generating wireless config"
+	/sbin/wifi config 2>/dev/null
+	sleep 2
+	fix_htmode_2g
+fi
+
+# kixdns 配置自检：非法 JSON → 从 /rom 恢复
+if [ -f /etc/kixdns/pipeline.json ] && ! jsonfilter -i /etc/kixdns/pipeline.json -e @.settings >/dev/null 2>&1; then
+	if [ -f /rom/etc/kixdns/pipeline.json ]; then
+		cp /rom/etc/kixdns/pipeline.json /etc/kixdns/pipeline.json
+		logger -t $TAG "pipeline.json invalid, restored from /rom"
+	fi
+fi
+
+# 信道默认值（首启时 wireless 可能刚生成，这里补跑一次 38）
+# 用 -f：uci-defaults 是被 boot 的 uci_apply_defaults 用 `. file` source 的，
+# 不要求可执行位；38 就是 0644，用 -x 判会永远判假。
+if [ -f /etc/uci-defaults/38_gwrt-wifi-channel ]; then
+	sh /etc/uci-defaults/38_gwrt-wifi-channel 2>/dev/null
+fi
+
+wifi reload 2>/dev/null
+
+if have_phy; then
+	logger -t $TAG "wifi ok: $(ls /sys/class/net/ | grep -c '^phy') phy"
+else
+	logger -t $TAG "wifi unavailable (no rmmod attempted)"
+	exit 1
+fi
+
+exit 0

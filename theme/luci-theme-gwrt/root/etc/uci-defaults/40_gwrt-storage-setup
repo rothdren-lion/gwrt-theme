@@ -2,10 +2,20 @@
 # GWRT: 存储布局规范化 —— 找出容量最大的可挂载分区，建标准 downloads 目录
 # 兼容 busybox：无 blockdev，用 sysfs size(扇区) × 512 估算
 
+# 2026-10-21: 包升级重装会重跑 uci-defaults —— once-marker 保证只生效一次（恢复出厂后重跑）
+[ -e /etc/gwrt/storage-setup.once ] && exit 0
+
 GWRT_STORE_DEV=""
 best=0
-for dev in /dev/mmcblk*p* /dev/sd[a-z]* /dev/nvme*n*p*; do
+for dev in /dev/mmcblk*p* /dev/sd[a-z]*[0-9]* /dev/nvme*n*p*; do
 	[ -b "$dev" ] || continue
+	# 2026-10-21：只认 ext4 数据分区 + 排除在用/系统分区
+	# （真机教训：cs-07 上"最大分区"= 2GB rootfs 槽 p18 → storage 指到系统盘）
+	case "$(block info "$dev" 2>/dev/null | sed -n 's/.*TYPE="\([^"]*\)".*/\1/p')" in
+		ext4) ;;
+		*) continue ;;
+	esac
+	mount 2>/dev/null | grep -q "^$dev " && continue
 	blk=$(basename "$dev")
 	[ -r "/sys/class/block/$blk/size" ] || continue
 	sect=$(cat "/sys/class/block/$blk/size" 2>/dev/null) || continue
@@ -14,7 +24,18 @@ for dev in /dev/mmcblk*p* /dev/sd[a-z]* /dev/nvme*n*p*; do
 	best=$sz; GWRT_STORE_DEV="$dev"
 done
 
-[ -n "$GWRT_STORE_DEV" ] || { logger -t 40_gwrt-storage "未找到可用数据分区"; exit 0; }
+[ -n "$GWRT_STORE_DEV" ] || {
+	# 没有 ext4 数据分区（如 cs-07）：storage 退回 overlay 上的 /mnt/storage
+	# 并清掉可能误指的 storage_dev（真机教训：曾指到 2GB rootfs 槽 p18）
+	uci -q delete gwrt.storage_dev
+	uci -q set gwrt.storage_mount='/mnt/storage'
+	uci -q set gwrt.downloads_dir='/mnt/storage/downloads'
+	uci -q commit gwrt
+	mkdir -p /mnt/storage/downloads; chmod 0777 /mnt/storage/downloads 2>/dev/null
+	logger -t 40_gwrt-storage "未找到 ext4 数据分区，storage 退回 /mnt/storage"
+	mkdir -p /etc/gwrt && touch /etc/gwrt/storage-setup.once
+	exit 0
+}
 
 # 找 GWRT_STORE_DEV 的真实挂载点（/proc/mounts 里按设备名精确匹配）
 mp=""
@@ -35,4 +56,5 @@ uci -q set gwrt.downloads_dir="$mp/downloads"
 uci -q commit gwrt
 
 logger -t 40_gwrt-storage "数据分区=$GWRT_STORE_DEV($((best/1024/1024))MB) 挂载点=$mp downloads=$mp/downloads"
+mkdir -p /etc/gwrt && touch /etc/gwrt/storage-setup.once
 exit 0
