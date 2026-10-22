@@ -1,0 +1,13 @@
+#!/bin/sh
+# GWRT: 固件默认主机名 = GWRT
+CUR="$(uci -q get system.@system[0].hostname)"
+# 保留用户已自定义的名字（不是出厂默认 ImmortalWrt 就尊重用户）
+if [ -z "$CUR" ] || [ "$CUR" = "ImmortalWrt" ] || [ "$CUR" = "OpenWrt" ]; then
+	uci -q set system.@system[0].hostname='GWRT'
+	uci -q commit system
+	/etc/init.d/system reload 2>/dev/null
+	logger -t 44_gwrt-hostname "主机名已设为 GWRT（原 $CUR）"
+else
+	logger -t 44_gwrt-hostname "保留用户自定义主机名 $CUR"
+fi
+exit 0

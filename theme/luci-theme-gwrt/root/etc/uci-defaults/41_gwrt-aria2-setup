@@ -1,0 +1,41 @@
+#!/bin/sh
+# GWRT: aria2 优化 —— 下载目录落到数据分区 downloads/aria2，并启用加速源
+DL="$(uci -q get gwrt.downloads_dir)"
+[ -n "$DL" ] || DL=/mnt/storage/downloads
+ARIA_DIR="$DL/aria2"
+mkdir -p "$ARIA_DIR" && chmod 0777 "$ARIA_DIR"
+
+uci -q set aria2.main.enabled='1'
+uci -q set aria2.main.dir="$ARIA_DIR"
+uci -q set aria2.main.download_dir="$ARIA_DIR"
+# 加速：多线程 + 分片 + 断点续传 + 走最快的镜像
+uci -q set aria2.main.continue='true'
+uci -q set aria2.main.split='16'
+uci -q set aria2.main.max_connection_per_server='16'
+uci -q set aria2.main.min_split_size='1M'
+uci -q set aria2.main.max_concurrent_downloads='16'
+uci -q set aria2.main.dht='true'
+uci -q set aria2.main.bt_tracker='true'
+uci -q set aria2.main.seed_ratio='1.0'
+uci -q set aria2.main.aria2_rpc_enable='true'
+uci -q set aria2.main.aria2_rpc_secret='gwrt'
+uci -q set aria2.main.rpc_listen_port='6800'
+uci -q set aria2.main.follow_torrent='mem'
+uci -q set aria2.main.auto_file_renaming='true'
+uci -q set aria2.main.user='root'
+# 国内加速镜像（OpenWrt 官方源 → 清华/上交镜像）
+uci -q set aria2.main.github_mirror='https://mirror.ghproxy.com/'
+uci -q commit aria2
+
+# aria2 的 opkg/apk 源加速（与 rpcd 无关，写 dnsmasq 无关项）
+mkdir -p /etc/gwrt
+cat > /etc/gwrt/mirrors.conf <<'EOF'
+# GWRT 软件源加速（首次刷机后 uci-defaults 只跑一次，这里作为常备配置）
+DISTRIB_ARCH=aarch64_cortex-a53
+SRC_PACKAGES=https://mirrors.tuna.tsinghua.edu.cn/immortalwrt/packages
+SRC_BASE=https://mirrors.tuna.tsinghua.edu.cn/immortalwrt
+EOF
+
+/etc/init.d/aria2 restart 2>/dev/null
+logger -t 41_gwrt-aria2 "aria2 已配置 dir=$ARIA_DIR rpc=6800 加速源已写入 /etc/gwrt/mirrors.conf"
+exit 0

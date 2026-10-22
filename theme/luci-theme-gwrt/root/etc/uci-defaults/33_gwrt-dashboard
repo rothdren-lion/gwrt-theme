@@ -1,0 +1,19 @@
+#!/bin/sh
+# GWRT dashboard dispatcher: replace stock admin_status template with backup.
+# Ships as /usr/share/gwrt/admin_status-index.ut to avoid apk file conflicts.
+SRC="/usr/share/gwrt/admin_status-index.ut"
+DST="/usr/share/ucode/luci/template/admin_status/index.ut"
+
+# The stock template may be absent when luci-mod-status is packaged without
+# its legacy Lua view. Always create the directory and install the dispatcher.
+if [ -f "$SRC" ]; then
+	mkdir -p "${DST%/*}"
+	if [ -f "$DST" ] && ! cmp -s "$SRC" "$DST"; then
+		cp -p "$DST" "$DST.bak-src" 2>/dev/null || true
+	fi
+	cp -f "$SRC" "$DST"
+	rm -f "$DST.bak-src"
+	# Clear LuCI's compiled template/index caches after replacing the entrypoint.
+	rm -f /tmp/luci-indexcache /tmp/luci-modulecache/* 2>/dev/null || true
+fi
+exit 0

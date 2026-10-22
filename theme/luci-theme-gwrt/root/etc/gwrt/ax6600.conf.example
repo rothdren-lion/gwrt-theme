@@ -1,0 +1,40 @@
+# ax6600.conf — GWRT AX6600 首次刷机自动恢复范本
+# 放入外置最后分区 APK/ 目录（/mnt/mmcblk*p*/APK/ax6600.conf 或 /mnt/APK/ax6600.conf）。
+# 每次重置后的系统 overlay 只自动尝试一次，流程不会重启路由器。
+# 同目录可放任意自选 *.apk；完整依赖集离线安装，缺依赖时才联网更新索引一次。
+# 可选放置 sha256sums（sha256sum -c 格式）检查 APK 是否完整。
+# 配置仅解析下面列出的 key=value 键，不作为 shell 脚本执行。
+# 系统状态：/etc/gwrt/apk-autoinstall.status；外置盘保留同名日志和状态。
+# 手动重试：/usr/libexec/gwrt-apk-autoinstall --force
+
+# LAN 固定 IP（默认 192.168.10.1）
+lan_ip=192.168.10.1
+lan_netmask=255.255.255.0
+
+# WAN 三选一：
+# 1) pppoe
+wan_proto=pppoe
+wan_username=pppoe账号
+wan_password=pppoe密码
+# 2) dhcp
+#wan_proto=dhcp
+# 3) static
+#wan_proto=static
+#wan_ip=10.0.0.100
+#wan_netmask=255.255.255.0
+#wan_gateway=10.0.0.1
+#wan_dns="114.114.114.114 8.8.8.8"
+
+# WiFi 按频段（顺序 2.4G -> 5.8G -> 5.2G，AX6600 5.8G=IPQ6018 5.2G=QCN9074）
+wifi_2g_ssid=Rodren
+wifi_2g_key=Abc123abc!!
+wifi_5g_ssid=AX6600_Gaming
+wifi_5g_key=Abc123abc???
+# 5.2G 另起（可选，QCN 正常时生效）
+#wifi_5g2_ssid=AX6600_5G2
+#wifi_5g2_key=Abc123abc???
+
+# 通用兜底（未分频段时对所有 default_* 生效）
+#wifi_ssid=MyWifi
+#wifi_key=12345678
+#wifi_channel=auto

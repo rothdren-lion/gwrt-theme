@@ -1,0 +1,93 @@
+#!/bin/sh
+
+# Keep the GWRT auto share pointed at the largest mounted eMMC data partition.
+# This also runs when Samba itself is disabled, so LuCI shows the real path.
+[ "${ACTION:-}" = "add" ] || exit 0
+[ -f /etc/config/samba4 ] || exit 0
+case "${DEVNAME:-}" in
+	mmcblk*p[0-9]*) ;;
+	*) exit 0 ;;
+esac
+
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
+partition_number() {
+	printf '%s\n' "$1" | sed -n 's/^mmcblk[0-9][0-9]*p\([0-9][0-9]*\)$/\1/p'
+}
+
+partition_sectors() {
+	[ -r "/sys/class/block/$1/size" ] && cat "/sys/class/block/$1/size" || printf '0\n'
+}
+
+block_field() {
+	local key="$1" line="$2"
+	printf '%s\n' "$line" | sed -n "s/.* $key=\"\([^\"]*\)\".*/\1/p"
+}
+
+find_share_mount() {
+	local dev base partno sectors best_mount best_sectors=0 best_partno=0
+	local info type mountpoint
+	local attempt
+
+	for attempt in 1 2 3 4 5; do
+		best_mount=""
+		best_sectors=0
+		best_partno=0
+		for dev in /dev/mmcblk[0-9]p*; do
+			[ -b "$dev" ] || continue
+			base="${dev##*/}"
+			partno="$(partition_number "$base")"
+			[ -n "$partno" ] || continue
+			sectors="$(partition_sectors "$base")"
+			case "$sectors" in
+				''|*[!0-9]*) sectors=0 ;;
+			esac
+			[ "$sectors" -ge 2097152 ] || continue
+
+			info="$(/sbin/block info "$dev" 2>/dev/null)"
+			type="$(block_field TYPE "$info")"
+			case "$type" in
+				ext4|f2fs|btrfs|xfs) ;;
+				*) continue ;;
+			esac
+			mountpoint="$(block_field MOUNT "$info")"
+			case "$mountpoint" in
+				/mnt/mmcblk[0-9]p*) ;;
+				*) continue ;;
+			esac
+
+			if [ "$sectors" -lt "$best_sectors" ] || {
+				[ "$sectors" -eq "$best_sectors" ] && [ "$partno" -le "$best_partno" ];
+			}; then
+				continue
+			fi
+			best_mount="$mountpoint"
+			best_sectors="$sectors"
+			best_partno="$partno"
+		done
+		[ -n "$best_mount" ] && break
+		sleep 1
+	done
+
+	[ -n "$best_mount" ] && printf '%s\n' "$best_mount"
+}
+
+share_mount="$(find_share_mount)"
+[ -n "$share_mount" ] || exit 0
+
+changed=0
+for section in $(uci -q show samba4 | sed -n 's/^samba4\.\(.*\)=sambashare$/\1/p'); do
+	[ "$(uci -q get "samba4.$section.gwrt_auto")" = "1" ] || continue
+	if [ "$(uci -q get "samba4.$section.name")" != "gwrt" ]; then
+		uci -q set "samba4.$section.name=gwrt"
+		changed=1
+	fi
+	if [ "$(uci -q get "samba4.$section.path")" != "$share_mount" ]; then
+		uci -q set "samba4.$section.path=$share_mount"
+		changed=1
+	fi
+done
+
+[ "$changed" -eq 1 ] && uci -q commit samba4
+exit 0

@@ -1,0 +1,755 @@
+#!/bin/sh
+# Restore a user-selected APK bundle and basic router settings from the
+# largest mounted eMMC data partition. Automatic mode is claimed once in
+# the persistent system overlay before external storage is inspected.
+
+set -u
+
+FORCE=0
+STATUS_ONLY=0
+while [ "$#" -gt 0 ]; do
+	case "$1" in
+		--force) FORCE=1 ;;
+		--status) STATUS_ONLY=1 ;;
+		-h|--help)
+			printf 'usage: %s [--force|--status]\n' "$0"
+			exit 0
+			;;
+		*)
+			printf 'unknown argument: %s\n' "$1" >&2
+			exit 2
+			;;
+	esac
+	shift
+done
+
+TAG="gwrt-apk"
+STATE_DIR="${GWRT_APK_STATE_DIR:-/etc/gwrt}"
+ONCEF="${GWRT_APK_ONCE_FILE:-$STATE_DIR/apk-autoinstall.once}"
+SYS_STATUSF="${GWRT_APK_STATUS_FILE:-$STATE_DIR/apk-autoinstall.status}"
+LOCKF="${GWRT_APK_LOCK_DIR:-/var/lock/gwrt-apk-autoinstall.lock}"
+TMP_ROOT="${GWRT_APK_TMP_DIR:-/tmp}"
+WWW_ROOT="${GWRT_APK_WWW_DIR:-/www}"
+MOUNT_OVERRIDE="${GWRT_APK_MOUNT:-}"
+MOUNT_WAIT="${GWRT_APK_MOUNT_WAIT:-90}"
+MOUNT_POLL="${GWRT_APK_MOUNT_POLL:-2}"
+RELEASE_FILE="${GWRT_APK_RELEASE_FILE:-/etc/openwrt_release}"
+INIT_SCRIPT="${GWRT_APK_INIT_SCRIPT:-/etc/init.d/gwrt-apk-autoinstall}"
+LOGF="$TMP_ROOT/gwrt-apk-autoinstall.log"
+ABORTF="$TMP_ROOT/gwrt-apk-autoinstall.abort"
+EXT_STATUSF=""
+EXT_STATEF=""
+ABORT_EXT=""
+APK_STAGE=""
+BOOT_ID="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || true)"
+STARTED_AT="$(date '+%Y-%m-%dT%H:%M:%S%z' 2>/dev/null || true)"
+ATTEMPT_MODE="automatic"
+[ "$FORCE" -eq 0 ] || ATTEMPT_MODE="manual-force"
+
+case "$MOUNT_WAIT" in ''|*[!0-9]*) MOUNT_WAIT=90 ;; esac
+case "$MOUNT_POLL" in ''|*[!0-9]*|0) MOUNT_POLL=2 ;; esac
+
+FIRMWARE_RELEASE=""
+FIRMWARE_REVISION=""
+FIRMWARE_TARGET=""
+FIRMWARE_KERNEL="$(uname -r 2>/dev/null || true)"
+if [ -r "$RELEASE_FILE" ]; then
+	FIRMWARE_RELEASE="$(sed -n "s/^DISTRIB_RELEASE='\\([^']*\\)'.*/\\1/p" "$RELEASE_FILE" 2>/dev/null | head -n 1)"
+	FIRMWARE_REVISION="$(sed -n "s/^DISTRIB_REVISION='\\([^']*\\)'.*/\\1/p" "$RELEASE_FILE" 2>/dev/null | head -n 1)"
+	FIRMWARE_TARGET="$(sed -n "s/^DISTRIB_TARGET='\\([^']*\\)'.*/\\1/p" "$RELEASE_FILE" 2>/dev/null | head -n 1)"
+fi
+if [ -n "$FIRMWARE_RELEASE$FIRMWARE_REVISION$FIRMWARE_TARGET$FIRMWARE_KERNEL" ]; then
+	FIRMWARE_ID="${FIRMWARE_RELEASE:-unknown}|${FIRMWARE_REVISION:-unknown}|${FIRMWARE_TARGET:-unknown}|${FIRMWARE_KERNEL:-unknown}"
+else
+	FIRMWARE_ID="$(cat /etc/openwrt_version 2>/dev/null || printf unknown)"
+fi
+
+MNT=""
+APK_DIR=""
+CFG_DIR=""
+CFG=""
+CHECKSUM_FILE=""
+CHECKSUM_DIR=""
+BUNDLE_SIG="none"
+APK_COUNT=0
+APK_VERIFIED=0
+APK_INSTALLED=0
+APK_SATISFIED=0
+APK_PENDING=0
+APK_FAILED=0
+APK_NAMES=""
+APK_PENDING_NAMES=""
+CONFIG_APPLIED=0
+CONFIG_FAILED=0
+DEPENDENCY_CHECK="not-run"
+FINAL_STATUS="starting"
+ACTIVATION_STATUS="not-needed"
+committed=0
+commit_failed=0
+network_committed=0
+wireless_committed=0
+need_commit_network=0
+need_commit_wireless=0
+
+log() {
+	printf '%s %s\n' "$(date '+%H:%M:%S')" "$*" >> "$LOGF" 2>/dev/null || true
+	logger -t "$TAG" "$@" 2>/dev/null || printf '%s: %s\n' "$TAG" "$*" >&2
+}
+
+hash_text() {
+	if command -v sha256sum >/dev/null 2>&1; then
+		printf '%s' "$1" | sha256sum | awk '{print $1}'
+	else
+		printf '%s' "$1" | cksum | awk '{print $1 ":" $2}'
+	fi
+}
+
+file_hash() {
+	if command -v sha256sum >/dev/null 2>&1; then
+		sha256sum "$1" 2>/dev/null | awk '{print $1}'
+	else
+		cksum "$1" 2>/dev/null | awk '{print $1 ":" $2}'
+	fi
+}
+
+write_once() {
+	local state="$1" tmp="${ONCEF}.tmp.$$"
+	mkdir -p "$STATE_DIR" 2>/dev/null || return 1
+	{
+		printf 'status=%s\n' "$state"
+		printf 'mode=%s\n' "$ATTEMPT_MODE"
+		printf 'firmware=%s\n' "$FIRMWARE_ID"
+		printf 'boot_id=%s\n' "$BOOT_ID"
+		printf 'started_at=%s\n' "$STARTED_AT"
+		printf 'updated_at=%s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z' 2>/dev/null || true)"
+	} > "$tmp" 2>/dev/null && mv -f "$tmp" "$ONCEF" 2>/dev/null || {
+		rm -f "$tmp" 2>/dev/null || true
+		return 1
+	}
+	sync
+}
+
+write_status_file() {
+	local target tmp
+	target="$1"
+	tmp="${target}.tmp.$$"
+	[ -n "$target" ] || return 0
+	mkdir -p "$(dirname "$target")" 2>/dev/null || return 1
+	{
+		printf 'status=%s\n' "$FINAL_STATUS"
+		printf 'mode=%s\n' "$ATTEMPT_MODE"
+		printf 'firmware=%s\n' "$FIRMWARE_ID"
+		printf 'source=%s\n' "${APK_DIR:-${CFG_DIR:-}}"
+		printf 'config=%s\n' "${CFG:-none}"
+		printf 'apk_count=%s\n' "$APK_COUNT"
+		printf 'apk_verified=%s\n' "$APK_VERIFIED"
+		printf 'apk_installed=%s\n' "$APK_INSTALLED"
+		printf 'apk_satisfied=%s\n' "$APK_SATISFIED"
+		printf 'apk_failed=%s\n' "$APK_FAILED"
+		printf 'config_applied=%s\n' "$CONFIG_APPLIED"
+		printf 'config_failed=%s\n' "$CONFIG_FAILED"
+		printf 'dependency_check=%s\n' "$DEPENDENCY_CHECK"
+		printf 'signature=%s\n' "$BUNDLE_SIG"
+		printf 'activation=%s\n' "$ACTIVATION_STATUS"
+		printf 'reboot=disabled\n'
+		if [ -n "$APK_NAMES" ]; then
+			printf '%s\n' "$APK_NAMES"
+		fi
+	} > "$tmp" 2>/dev/null && mv -f "$tmp" "$target" 2>/dev/null || {
+		rm -f "$tmp" 2>/dev/null || true
+		return 1
+	}
+}
+
+write_status() {
+	write_status_file "$SYS_STATUSF" || true
+	[ -z "$EXT_STATUSF" ] || write_status_file "$EXT_STATUSF" || true
+}
+
+write_external_state() {
+	local state="$1" tmp
+	[ -n "$EXT_STATEF" ] || return 0
+	tmp="${EXT_STATEF}.tmp.$$"
+	{
+		printf 'signature=%s\n' "$BUNDLE_SIG"
+		printf 'status=%s\n' "$state"
+		printf 'boot_id=%s\n' "$BOOT_ID"
+		printf 'system_once=%s\n' "$ONCEF"
+	} > "$tmp" 2>/dev/null && mv -f "$tmp" "$EXT_STATEF" 2>/dev/null || true
+}
+
+if [ "$STATUS_ONLY" -eq 1 ]; then
+	if [ -r "$SYS_STATUSF" ]; then
+		cat "$SYS_STATUSF"
+	elif [ -r "$ONCEF" ]; then
+		cat "$ONCEF"
+	else
+		printf 'status=not-run\n'
+	fi
+	exit 0
+fi
+
+cleanup() {
+	if [ -n "$APK_STAGE" ] && [ -d "$APK_STAGE" ]; then
+		case "$APK_STAGE" in
+			"$TMP_ROOT"/gwrt-apk-autoinstall.*) rm -rf "$APK_STAGE" 2>/dev/null || true ;;
+		esac
+	fi
+	rm -f "$LOCKF/pid" 2>/dev/null || true
+	rmdir "$LOCKF" 2>/dev/null || true
+}
+
+acquire_lock() {
+	local oldpid=""
+	mkdir -p "$(dirname "$LOCKF")" 2>/dev/null || return 1
+	if ! mkdir "$LOCKF" 2>/dev/null; then
+		oldpid="$(cat "$LOCKF/pid" 2>/dev/null || true)"
+		case "$oldpid" in
+			''|*[!0-9]*) ;;
+			*) kill -0 "$oldpid" 2>/dev/null && return 1 ;;
+		esac
+		rm -f "$LOCKF/pid" 2>/dev/null || true
+		rmdir "$LOCKF" 2>/dev/null || return 1
+		mkdir "$LOCKF" 2>/dev/null || return 1
+	fi
+	printf '%s\n' "$$" > "$LOCKF/pid" 2>/dev/null || return 1
+}
+
+if ! acquire_lock; then
+	log "another recovery process is active; skip"
+	exit 0
+fi
+trap cleanup EXIT
+trap 'exit 130' HUP INT TERM
+
+disable_init() {
+	[ -x "$INIT_SCRIPT" ] || return 0
+	"$INIT_SCRIPT" disable >/dev/null 2>&1 || true
+}
+
+if [ "$FORCE" -eq 0 ] && [ -e "$ONCEF" ]; then
+	log "automatic recovery was already claimed; skip and keep one-shot off"
+	disable_init
+	exit 0
+fi
+if ! write_once running; then
+	log "cannot persist the one-shot marker; refusing an unguarded automatic run"
+	exit 1
+fi
+if [ "$FORCE" -eq 0 ]; then
+	disable_init
+fi
+
+find_mnt() {
+	local best="" best_num=-1 dev mnt num
+	if [ -n "$MOUNT_OVERRIDE" ]; then
+		[ -d "$MOUNT_OVERRIDE" ] || return 1
+		printf '%s' "$MOUNT_OVERRIDE"
+		return 0
+	fi
+	while read -r dev mnt _; do
+		case "$mnt" in /mnt|/mnt/mmcblk*) ;; *) continue ;; esac
+		case "$dev" in /dev/mmcblk*) ;; *) continue ;; esac
+		num="$(printf '%s' "$dev" | sed -n 's/.*p\([0-9]*\)$/\1/p')"
+		case "$num" in ''|*[!0-9]*) continue ;; esac
+		if [ "$num" -gt "$best_num" ]; then
+			best="$mnt"
+			best_num="$num"
+		fi
+	done < /proc/mounts 2>/dev/null
+	[ -n "$best" ] || return 1
+	printf '%s' "$best"
+}
+
+waited=0
+while [ "$waited" -le "$MOUNT_WAIT" ]; do
+	MNT="$(find_mnt 2>/dev/null || true)"
+	[ -n "$MNT" ] && break
+	[ "$waited" -eq "$MOUNT_WAIT" ] && break
+	sleep "$MOUNT_POLL"
+	waited=$((waited + MOUNT_POLL))
+	[ "$waited" -le "$MOUNT_WAIT" ] || waited="$MOUNT_WAIT"
+done
+if [ -z "$MNT" ]; then
+	FINAL_STATUS="no-media"
+	ACTIVATION_STATUS="not-needed"
+	write_status
+	write_once no-media || true
+	log "no mounted eMMC data partition found; automatic attempt is complete"
+	exit 0
+fi
+
+mkdir -p "$MNT/APK" 2>/dev/null || true
+EXT_STATEF="$MNT/.gwrt-apk-autoinstall.state"
+EXT_STATUSF="$MNT/gwrt-apk-autoinstall.status"
+EXT_LOGF="$MNT/gwrt-apk-autoinstall.log"
+ABORT_EXT="$MNT/.gwrt-apk-autoinstall.abort"
+if [ "$LOGF" != "$EXT_LOGF" ]; then
+	[ ! -s "$LOGF" ] || cat "$LOGF" >> "$EXT_LOGF" 2>/dev/null || true
+	LOGF="$EXT_LOGF"
+fi
+
+has_apk_files() {
+	local dir="$1" f
+	for f in "$dir"/*.apk; do
+		[ -f "$f" ] && return 0
+	done
+	return 1
+}
+
+for cand in "$MNT/APK" "$MNT/apk" "$MNT/APK/app" "$MNT/apk/app"; do
+	[ -d "$cand" ] || continue
+	if has_apk_files "$cand"; then
+		APK_DIR="$cand"
+		break
+	fi
+done
+
+for cand in "$MNT/APK" "$MNT/apk" "$MNT/APK/app" "$MNT/apk/app"; do
+	[ -d "$cand" ] || continue
+	for cfg_name in ax6600.conf config config.txt auto.conf network.conf setup.conf gwrt.conf openwrt.conf; do
+		if [ -f "$cand/$cfg_name" ]; then
+			CFG_DIR="$cand"
+			CFG="$cand/$cfg_name"
+			break 2
+		fi
+	done
+done
+
+for cand in "$APK_DIR" "$MNT/APK" "$MNT/apk" "$MNT/APK/app" "$MNT/apk/app"; do
+	[ -d "$cand" ] || continue
+	for sum_name in sha256sums SHA256SUMS manifest.sha256 APK.sha256; do
+		if [ -f "$cand/$sum_name" ]; then
+			CHECKSUM_FILE="$cand/$sum_name"
+			CHECKSUM_DIR="$cand"
+			break 2
+		fi
+	done
+done
+
+sig_input="firmware=$FIRMWARE_ID\napk_dir=${APK_DIR:-none}\nconfig=${CFG:-none}"
+if [ -n "$CFG" ]; then
+	sig_input="$sig_input\nconfig_hash=$(file_hash "$CFG")"
+fi
+if [ -n "$APK_DIR" ]; then
+	for f in "$APK_DIR"/*.apk; do
+		[ -f "$f" ] || continue
+		APK_COUNT=$((APK_COUNT + 1))
+		file_size="$(wc -c < "$f" 2>/dev/null || printf 0)"
+		sig_input="$sig_input\napk=$(basename "$f"):$file_size:$(file_hash "$f")"
+	done
+fi
+BUNDLE_SIG="$(hash_text "$sig_input")"
+
+rm -f "$ABORTF"
+: >> "$LOGF" 2>/dev/null || true
+log "external recovery started (apk=${APK_DIR:-none}, config=${CFG:-none}, mount=$MNT, mode=$ATTEMPT_MODE)"
+mkdir -p "$TMP_ROOT/gwrt" "$WWW_ROOT" 2>/dev/null || true
+printf '%s' "${APK_DIR:-$CFG_DIR}" > "$TMP_ROOT/gwrt/apk-autoinstall.src" 2>/dev/null || true
+ln -sf "$LOGF" "$WWW_ROOT/gwrt-apk-autoinstall.log" 2>/dev/null || true
+ln -sf "$EXT_STATUSF" "$WWW_ROOT/gwrt-apk-autoinstall.status" 2>/dev/null || true
+FINAL_STATUS="running"
+write_external_state running
+write_status
+
+check_abort() {
+	if [ -f "$ABORTF" ] || { [ -n "$ABORT_EXT" ] && [ -f "$ABORT_EXT" ]; }; then
+		log "abort requested"
+		FINAL_STATUS="aborted"
+		write_external_state aborted
+		write_status
+		write_once aborted || true
+		exit 0
+	fi
+}
+
+installed_version() {
+	local name="$1"
+	command -v apk >/dev/null 2>&1 || return 1
+	apk query --from installed --fields version "$name" 2>/dev/null |
+		sed -n 's/^Version: //p' | head -n 1
+}
+
+checksum_failed=0
+if [ -n "$CHECKSUM_FILE" ]; then
+	if ! command -v sha256sum >/dev/null 2>&1; then
+		log "checksum file found but sha256sum is unavailable: $CHECKSUM_FILE"
+		checksum_failed=1
+	elif (cd "$CHECKSUM_DIR" && sha256sum -c "$(basename "$CHECKSUM_FILE")") >> "$LOGF" 2>&1; then
+		log "checksum verification passed: $CHECKSUM_FILE"
+	else
+		log "checksum verification failed: $CHECKSUM_FILE"
+		checksum_failed=1
+	fi
+else
+	log "no checksum file; APK metadata and dependency simulation will be used"
+fi
+
+if [ "$APK_COUNT" -eq 0 ]; then
+	log "no APK files found under ${APK_DIR:-$MNT/APK}"
+elif ! command -v apk >/dev/null 2>&1; then
+	log "apk command is unavailable"
+	APK_FAILED="$APK_COUNT"
+else
+	APK_STAGE="$TMP_ROOT/gwrt-apk-autoinstall.$$"
+	if ! mkdir -p "$APK_STAGE"; then
+		log "cannot create APK staging directory: $APK_STAGE"
+		APK_FAILED="$APK_COUNT"
+	else
+		for f in "$APK_DIR"/*.apk; do
+			check_abort
+			[ -f "$f" ] || continue
+			pkg_name="$(apk adbdump "$f" 2>/dev/null | awk '$1 == "name:" { print $2; exit }')"
+			pkg_version="$(apk adbdump "$f" 2>/dev/null | awk '$1 == "version:" { print $2; exit }')"
+			if [ -z "$pkg_name" ] || [ -z "$pkg_version" ]; then
+				log "cannot read APK metadata: $f"
+				APK_FAILED=$((APK_FAILED + 1))
+				continue
+			fi
+			if apk verify --allow-untrusted "$f" >> "$LOGF" 2>&1; then
+				APK_VERIFIED=$((APK_VERIFIED + 1))
+			else
+				log "APK integrity/signature check failed: $f"
+				APK_FAILED=$((APK_FAILED + 1))
+			fi
+
+			installed_ver="$(installed_version "$pkg_name" || true)"
+			version_cmp=""
+			[ -z "$installed_ver" ] || version_cmp="$(apk version -t "$installed_ver" "$pkg_version" 2>/dev/null || true)"
+			case "$version_cmp" in
+				'='|'>')
+					APK_SATISFIED=$((APK_SATISFIED + 1))
+					APK_NAMES="${APK_NAMES}${APK_NAMES:+
+}package=$pkg_name file=$(basename "$f") state=satisfied installed=$installed_ver candidate=$pkg_version"
+					log "APK already satisfied: $pkg_name installed=$installed_ver candidate=$pkg_version"
+					;;
+				*)
+					APK_PENDING=$((APK_PENDING + 1))
+					APK_PENDING_NAMES="${APK_PENDING_NAMES}${APK_PENDING_NAMES:+ }$pkg_name"
+					APK_NAMES="${APK_NAMES}${APK_NAMES:+
+}package=$pkg_name file=$(basename "$f") state=pending installed=${installed_ver:-none} candidate=$pkg_version"
+					ln -s "$f" "$APK_STAGE/$(basename "$f")" 2>/dev/null || {
+						log "cannot stage APK: $f"
+						APK_FAILED=$((APK_FAILED + 1))
+					}
+					;;
+			esac
+		done
+	fi
+
+	if [ "$checksum_failed" -eq 1 ] || [ "$APK_FAILED" -ne 0 ] || [ "$APK_VERIFIED" -ne "$APK_COUNT" ]; then
+		DEPENDENCY_CHECK="not-run"
+		log "APK preflight failed; install skipped (count=$APK_COUNT verified=$APK_VERIFIED failed=$APK_FAILED)"
+	elif [ "$APK_PENDING" -eq 0 ]; then
+		DEPENDENCY_CHECK="not-needed"
+		log "all APK packages are installed at the same or newer version"
+	else
+		install_mode=""
+		if apk --no-network --force-missing-repositories --allow-untrusted add --simulate "$APK_STAGE"/*.apk >> "$LOGF" 2>&1; then
+			install_mode="offline"
+			DEPENDENCY_CHECK="pass-offline"
+			log "offline APK dependency check passed"
+		else
+			log "offline dependencies are incomplete; refreshing repository indexes once"
+			if apk --timeout 20 update >> "$LOGF" 2>&1 && \
+				apk --allow-untrusted add --simulate "$APK_STAGE"/*.apk >> "$LOGF" 2>&1; then
+				install_mode="online"
+				DEPENDENCY_CHECK="pass-online"
+				log "online APK dependency check passed"
+			else
+				DEPENDENCY_CHECK="failed"
+				APK_FAILED="$APK_PENDING"
+				log "APK dependencies remain incomplete after the online retry"
+			fi
+		fi
+
+		install_rc=1
+		if [ "$install_mode" = "offline" ]; then
+			apk --no-network --force-missing-repositories --allow-untrusted add "$APK_STAGE"/*.apk >> "$LOGF" 2>&1
+			install_rc=$?
+		elif [ "$install_mode" = "online" ]; then
+			apk --allow-untrusted add "$APK_STAGE"/*.apk >> "$LOGF" 2>&1
+			install_rc=$?
+		fi
+
+		if [ "$install_rc" -eq 0 ]; then
+			for pkg_name in $APK_PENDING_NAMES; do
+				if apk info --exists --installed "$pkg_name" >/dev/null 2>&1 || [ -f "/lib/apk/packages/$pkg_name.list" ]; then
+					APK_INSTALLED=$((APK_INSTALLED + 1))
+				else
+					log "APK transaction succeeded but package is not installed: $pkg_name"
+					APK_FAILED=$((APK_FAILED + 1))
+				fi
+			done
+			log "APK transaction complete (requested=$APK_COUNT satisfied=$APK_SATISFIED installed=$APK_INSTALLED failed=$APK_FAILED)"
+		else
+			log "APK transaction failed"
+			[ "$APK_FAILED" -ne 0 ] || APK_FAILED="$APK_PENDING"
+		fi
+	fi
+fi
+
+lan_ip=""
+lan_netmask=""
+wan_proto=""
+wan_ip=""
+wan_netmask=""
+wan_gateway=""
+wan_dns=""
+wan_username=""
+wan_password=""
+wifi_2g_ssid=""
+wifi_2g_key=""
+wifi_5g_ssid=""
+wifi_5g_key=""
+wifi_5g2_ssid=""
+wifi_5g2_key=""
+wifi_ssid=""
+wifi_key=""
+wifi_channel=""
+
+trim_space() {
+	printf '%s' "$1" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+}
+
+load_config() {
+	local source="$1" raw line key value parse_failed=0
+	while IFS= read -r raw || [ -n "$raw" ]; do
+		line="$(printf '%s' "$raw" | tr -d '\r')"
+		line="$(trim_space "$line")"
+		case "$line" in ''|'#'*) continue ;; esac
+		case "$line" in
+			*=*) ;;
+			*)
+				log "invalid config line ignored"
+				parse_failed=1
+				continue
+				;;
+		esac
+		key="$(trim_space "${line%%=*}")"
+		value="$(trim_space "${line#*=}")"
+		case "$value" in
+			\"*\") value="${value#\"}"; value="${value%\"}" ;;
+			\'*\') value="${value#\'}"; value="${value%\'}" ;;
+		esac
+		case "$key" in
+			lan_ip) lan_ip="$value" ;;
+			lan_netmask) lan_netmask="$value" ;;
+			wan_proto) wan_proto="$value" ;;
+			wan_ip) wan_ip="$value" ;;
+			wan_netmask) wan_netmask="$value" ;;
+			wan_gateway) wan_gateway="$value" ;;
+			wan_dns) wan_dns="$value" ;;
+			wan_username) wan_username="$value" ;;
+			wan_password) wan_password="$value" ;;
+			wifi_2g_ssid) wifi_2g_ssid="$value" ;;
+			wifi_2g_key) wifi_2g_key="$value" ;;
+			wifi_5g_ssid) wifi_5g_ssid="$value" ;;
+			wifi_5g_key) wifi_5g_key="$value" ;;
+			wifi_5g2_ssid) wifi_5g2_ssid="$value" ;;
+			wifi_5g2_key) wifi_5g2_key="$value" ;;
+			wifi_ssid) wifi_ssid="$value" ;;
+			wifi_key) wifi_key="$value" ;;
+			wifi_channel) wifi_channel="$value" ;;
+			*) log "unsupported config key ignored: $key" ;;
+		esac
+	done < "$source"
+	[ "$parse_failed" -eq 0 ]
+}
+
+uci_set() {
+	local assignment="$1" key value current
+	key="${assignment%%=*}"
+	value="${assignment#*=}"
+	current="$(uci -q get "$key" 2>/dev/null || true)"
+	[ "$current" != "$value" ] || return 2
+	if uci -q set "$assignment"; then
+		case "$key" in
+			network.*) need_commit_network=1 ;;
+			wireless.*) need_commit_wireless=1 ;;
+		esac
+		return 0
+	fi
+	CONFIG_FAILED=1
+	log "uci set failed: $key"
+	return 1
+}
+
+wait_wifi_iface() {
+	# ath11k 的 phy/iface 注册要 20~90s，本脚本在开机早期跑时 wireless 里
+	# 还没有 wifi-iface → apply_wifi_band 会整体空转（实机 2026-09-13：ax6600.conf
+	# 的 SSID/密码一个都没写进去，留下 open SSID，而 open 网络在本栈数据面是坏的）。
+	local i=0
+	while [ "$i" -lt 180 ]; do
+		uci -q show wireless 2>/dev/null | grep -q '=wifi-iface' && return 0
+		check_abort 2>/dev/null
+		sleep 2
+		i=$((i + 2))
+	done
+	log "wifi iface not ready after 180s; wifi settings skipped"
+	return 1
+}
+
+apply_wifi_band() {
+	local band="$1" ssid="$2" key="$3" dev d_band bpath sec
+	[ -n "$ssid" ] || [ -n "$key" ] || return 0
+	for dev in $(uci -q show wireless | sed -n "s/^wireless\.\([^=]*\)\.type=.*/\1/p"); do
+		d_band="$(uci -q get wireless."$dev".band 2>/dev/null || true)"
+		bpath="$(uci -q get wireless."$dev".path 2>/dev/null || true)"
+		case "$band" in
+			2g) case "$d_band" in *2g*) ;; *) continue ;; esac ;;
+			5g)
+				case "$d_band" in *5g*) ;; *) continue ;; esac
+				case "$bpath" in *pci*|*pcie*|*0000:*) continue ;; esac
+				;;
+			5g2)
+				case "$d_band" in *5g*) ;; *) continue ;; esac
+				case "$bpath" in *pci*|*pcie*|*0000:*) ;; *) continue ;; esac
+				;;
+		esac
+		for sec in $(uci -q show wireless | sed -n "s/^wireless\.\([^=]*\)\.device=.*'$dev'.*/\1/p"); do
+			[ -z "$ssid" ] || uci_set wireless."$sec".ssid="$ssid"
+			if [ -n "$key" ]; then
+				uci_set wireless."$sec".key="$key"
+				uci_set wireless."$sec".encryption="psk2"
+			fi
+		done
+		log "wifi band configured: $band"
+	done
+}
+
+if [ -z "$CFG" ]; then
+	log "no network config found"
+elif ! load_config "$CFG"; then
+	CONFIG_FAILED=1
+	log "config parsing failed; no router settings were changed"
+else
+	check_abort
+	[ -z "$lan_ip" ] || uci_set network.lan.ipaddr="$lan_ip"
+	[ -z "$lan_netmask" ] || uci_set network.lan.netmask="$lan_netmask"
+
+	if [ -n "$wan_proto" ]; then
+		case "$wan_proto" in
+			pppoe)
+				uci_set network.wan.proto="pppoe"
+				[ -z "$wan_username" ] || uci_set network.wan.username="$wan_username"
+				[ -z "$wan_password" ] || uci_set network.wan.password="$wan_password"
+				;;
+			static)
+				uci_set network.wan.proto="static"
+				[ -z "$wan_ip" ] || uci_set network.wan.ipaddr="$wan_ip"
+				[ -z "$wan_netmask" ] || uci_set network.wan.netmask="$wan_netmask"
+				[ -z "$wan_gateway" ] || uci_set network.wan.gateway="$wan_gateway"
+				[ -z "$wan_dns" ] || uci_set network.wan.dns="$wan_dns"
+				;;
+			dhcp) uci_set network.wan.proto="dhcp" ;;
+			*)
+				CONFIG_FAILED=1
+				log "unsupported WAN protocol: $wan_proto"
+				;;
+		esac
+	fi
+
+	if wait_wifi_iface; then
+		apply_wifi_band 2g "$wifi_2g_ssid" "$wifi_2g_key"
+		apply_wifi_band 5g "$wifi_5g_ssid" "$wifi_5g_key"
+		apply_wifi_band 5g2 "$wifi_5g2_ssid" "$wifi_5g2_key"
+	fi
+
+	if [ -n "$wifi_ssid" ] && [ -z "$wifi_2g_ssid$wifi_5g_ssid$wifi_5g2_ssid" ]; then
+		for sec in $(uci -q show wireless | sed -n "s/^wireless\.\([^=]*\)\.device=.*/\1/p"); do
+			case "$sec" in default_*) uci_set wireless."$sec".ssid="$wifi_ssid" ;; esac
+		done
+	fi
+	if [ -n "$wifi_key" ] && [ -z "$wifi_2g_key$wifi_5g_key$wifi_5g2_key" ]; then
+		for sec in $(uci -q show wireless | sed -n "s/^wireless\.\([^=]*\)\.ssid=.*/\1/p"); do
+			uci_set wireless."$sec".key="$wifi_key"
+			uci_set wireless."$sec".encryption="psk2"
+		done
+	fi
+	if [ -n "$wifi_channel" ] && [ "$wifi_channel" != auto ]; then
+		for dev in $(uci -q show wireless | sed -n "s/^wireless\.\([^=]*\)\.type=.*/\1/p"); do
+			uci_set wireless."$dev".channel="$wifi_channel"
+		done
+	fi
+
+	if [ "$need_commit_network" -eq 1 ]; then
+		if uci -q commit network; then
+			committed=1
+			network_committed=1
+			log "network config committed"
+		else
+			commit_failed=1
+			log "network config commit failed"
+		fi
+	fi
+	if [ "$need_commit_wireless" -eq 1 ]; then
+		if uci -q commit wireless; then
+			committed=1
+			wireless_committed=1
+			log "wireless config committed"
+		else
+			commit_failed=1
+			log "wireless config commit failed"
+		fi
+	fi
+	if [ "$commit_failed" -eq 1 ]; then
+		CONFIG_FAILED=1
+	else
+		CONFIG_APPLIED=1
+	fi
+fi
+
+overall_failed=0
+[ "$APK_FAILED" -eq 0 ] || overall_failed=1
+[ "$CONFIG_FAILED" -eq 0 ] || overall_failed=1
+if [ "$overall_failed" -eq 0 ]; then
+	FINAL_STATUS="done"
+else
+	FINAL_STATUS="failed"
+fi
+
+if [ "$committed" -eq 1 ] || [ "$APK_INSTALLED" -gt 0 ]; then
+	ACTIVATION_STATUS="reloading"
+else
+	ACTIVATION_STATUS="not-needed"
+fi
+write_external_state "$FINAL_STATUS"
+write_status
+write_once "$FINAL_STATUS" || true
+sync
+
+activation_failed=0
+if [ "$committed" -eq 1 ] || [ "$APK_INSTALLED" -gt 0 ]; then
+	if command -v reload_config >/dev/null 2>&1; then
+		reload_config >/dev/null 2>&1 || activation_failed=1
+	fi
+	if [ "$network_committed" -eq 1 ]; then
+		if command -v ubus >/dev/null 2>&1; then
+			ubus call network reload >/dev/null 2>&1 || activation_failed=1
+		elif [ -x /etc/init.d/network ]; then
+			/etc/init.d/network reload >/dev/null 2>&1 || activation_failed=1
+		else
+			activation_failed=1
+		fi
+	fi
+	if [ "$wireless_committed" -eq 1 ]; then
+		if command -v wifi >/dev/null 2>&1; then
+			wifi reload >/dev/null 2>&1 || activation_failed=1
+		else
+			activation_failed=1
+		fi
+	fi
+	if [ "$activation_failed" -eq 0 ]; then
+		ACTIVATION_STATUS="reloaded"
+	else
+		ACTIVATION_STATUS="reload-failed"
+		[ "$FINAL_STATUS" != done ] || FINAL_STATUS="done-reload-failed"
+	fi
+	write_external_state "$FINAL_STATUS"
+	write_status
+	write_once "$FINAL_STATUS" || true
+	sync
+fi
+
+log "external recovery finished (status=$FINAL_STATUS, activation=$ACTIVATION_STATUS, reboot=disabled)"

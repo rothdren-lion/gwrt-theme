@@ -1,0 +1,201 @@
+{
+ "luci-theme-gwrt": {
+  "description": "Grant access for luci-theme-gwrt dashboard",
+  "read": {
+   "uci": [
+    "dhcp",
+    "eqos",
+    "firewall",
+    "gwrt",
+    "network",
+    "system",
+    "wireless"
+   ],
+   "file": {
+    "/usr/libexec/syslog-wrapper": [
+     "exec"
+    ],
+    "/usr/libexec/gwrt-ota": [
+     "exec"
+    ],
+    "/usr/libexec/gwrt-lan-alias": [
+     "exec"
+    ],
+    "/bin/cat": [
+     "exec"
+    ],
+    "/sys/devices/soc0/machine": [
+     "read"
+    ],
+    "/etc/bench.log": [
+     "read"
+    ],
+    "/etc/coremark.sh": [
+     "read"
+    ],
+    "/usr/libexec/gwrt-coremark": [
+     "exec"
+    ],
+    "/proc/cpuinfo": [
+     "read"
+    ],
+    "/proc/net/nf_conntrack": [
+     "read"
+    ],
+    "/proc/net/dev": [
+     "read"
+    ],
+    "/sys/kernel/debug/qca-nss-drv/stats/ipv4": [
+     "read"
+    ],
+    "/sys/kernel/debug/qca-nss-drv/stats/ipv6": [
+     "read"
+    ],
+    "/sys/class/net/*/statistics/*": [
+     "read"
+    ],
+    "/sys/class/thermal/*/temp": [
+     "read"
+    ],
+    "/bin/df": [
+     "exec"
+    ],
+    "/etc/init.d/eqos": [
+     "exec"
+    ],
+    "/etc/init.d/firewall": [
+     "exec"
+    ],
+    "/sbin/fw4": [
+     "exec"
+    ],
+    "/usr/sbin/conntrack": [
+     "exec"
+    ],
+    "/etc/init.d/sysntpd": [
+     "exec"
+    ],
+    "/usr/libexec/gwrt-wan6-address": [
+     "exec"
+    ]
+   },
+   "ubus": {
+    "file": [
+     "read",
+     "exec",
+     "stat",
+     "list"
+    ],
+    "system": [
+     "info",
+     "board"
+    ],
+    "iwinfo": [
+     "info",
+     "assoclist",
+     "freqlist",
+     "countrylist",
+     "txpowerlist"
+    ],
+    "network.device": [
+     "status"
+    ],
+    "network.interface": [
+     "dump",
+     "status"
+    ],
+    "network.wireless": [
+     "status"
+    ],
+    "luci": [
+     "getCPUBench",
+     "getCPUUsage",
+     "getTempInfo",
+     "getOnlineUsers",
+     "getRealtimeStats",
+     "getConntrackList",
+     "getVersion",
+     "getUnixtime",
+     "getBuiltinEthernetPorts",
+     "getBoardJSON",
+     "getInitList",
+     "getNetworkDevices"
+    ],
+    "luci-rpc": [
+     "getNetworkDevices",
+     "getWirelessDevices",
+     "getDHCPLeases",
+     "getHostHints",
+     "getDUIDHints"
+    ],
+    "luci.bandix": [
+     "getStatus",
+     "getConnection",
+     "getDnsStats",
+     "getTopTalkers"
+    ],
+    "luci.bandix_plus": [
+     "getDevices",
+     "getStatus"
+    ],
+    "fwx": [
+     "common"
+    ],
+    "appfilter": [
+     "class_list",
+     "dev_list",
+     "get_all_users",
+     "app_list"
+    ],
+    "podmanmarket": [
+     "list"
+    ],
+    "uci": [
+     "get"
+    ]
+   }
+  },
+  "write": {
+   "uci": [
+    "dhcp",
+    "eqos",
+    "firewall",
+    "gwrt",
+    "network",
+    "wireless"
+   ],
+   "file": {
+    "/etc/init.d/eqos": [
+     "exec"
+    ],
+    "/etc/init.d/firewall": [
+     "exec"
+    ],
+    "/usr/sbin/conntrack": [
+     "exec"
+    ]
+   },
+   "ubus": {
+    "uci": [
+     "get",
+     "set",
+     "add",
+     "delete",
+     "commit",
+     "apply",
+     "reload_config"
+    ],
+    "file": [
+     "exec"
+    ],
+    "network.interface.*": [
+     "up"
+    ],
+    "network.wireless": [
+     "down",
+     "up"
+    ]
+   }
+  }
+ }
+}

@@ -1,0 +1,70 @@
+#!/bin/sh
+# GWRT SSID 命名（在 phy 出现后执行）— 2026-09-20
+#
+# 为什么需要它：
+#   `uci-defaults/35_gwrt-ssid-mac` 里已经写好了 GWRT_<频段>_<MAC后4> 的命名逻辑，
+#   但它跑在 S10boot，此时 ath11k phy 尚未出现（NSS 模式下 fw2 探测要等 ~60s），
+#   /etc/config/wireless 里没有 wifi-iface → 脚本 `... || exit 1` 直接退出，
+#   改名从未发生，SSID 就停在默认值（fork 曾把 mac80211.uc 兜底改成 "GWRT"）。
+#   本 hook 由 procd 在 phy 热插拔（10-wifi-detect 之后，字母序 30 > 10）时拉起，
+#   此时配置已生成，命名才能真正落地。
+#
+# 命名规则与 35_gwrt-ssid-mac 完全一致，且共用 /lib/functions/gwrt-wireless.sh：
+#   2.4G → GWRT_2.4G_<MAC后4>
+#   5.8G → GWRT_5.8G_<MAC后4>   (6018 内置 5G)
+#   5.2G → GWRT_5.2G_<MAC后4>   (QCN9074 PCIe 5G)
+# 只改「默认 SSID」（GWRT / GWRT_xxx / OpenWrt / 空），绝不碰用户自定义 SSID；
+# 仅当真的发生变更才 wifi reload，避免自激。
+
+[ "$ACTION" = "add" ] || exit 0
+
+[ -x /sbin/wifi ] || exit 0
+
+. /lib/functions/gwrt-wireless.sh
+
+# 等 wifi config 把 section 建出来
+i=0
+while [ "$i" -lt 30 ]; do
+	uci -q show wireless 2>/dev/null | grep -q '=wifi-iface' && break
+	sleep 1
+	i=$((i + 1))
+done
+uci -q show wireless 2>/dev/null | grep -q '=wifi-iface' || exit 0
+
+# MAC 后四位（设备树 label-mac-device 最早可用）
+mac="$(get_mac_label 2>/dev/null)"
+[ -n "$mac" ] || mac="$(uci -q get network.lan.macaddr)"
+[ -n "$mac" ] || mac="$(cat /sys/class/net/br-lan/address 2>/dev/null)"
+[ -n "$mac" ] || exit 0
+
+mac_suffix="$(printf '%s' "$mac" | tr -d ':' | tr 'a-f' 'A-F' | tail -c 5 | head -c 4)"
+[ ${#mac_suffix} -eq 4 ] || exit 0
+
+changed=0
+
+for iface in $(uci -q show wireless | sed -n 's/^\(wireless\.[^.]*\)=wifi-iface$/\1/p' | cut -d. -f2); do
+	[ "$(uci -q get "wireless.$iface.mode")" = ap ] || continue
+
+	device="$(uci -q get "wireless.$iface.device")"
+	[ -n "$device" ] || continue
+
+	path="$(uci -q get "wireless.$device.path")"
+	band="$(uci -q get "wireless.$device.band")"
+	band_label="$(gwrt_wifi_role "$path" "$band")" || continue
+
+	cur_ssid="$(uci -q get "wireless.$iface.ssid")"
+	gwrt_wifi_is_default_ssid "$cur_ssid" || continue
+
+	new_ssid="GWRT_${band_label}_${mac_suffix}"
+	[ "$cur_ssid" = "$new_ssid" ] && continue
+
+	uci -q set "wireless.$iface.ssid=$new_ssid" && changed=1
+done
+
+if [ "$changed" = "1" ]; then
+	uci -q commit wireless
+	logger -t gwrt-ssid -p daemon.notice "SSID 已按频段命名（后缀 $mac_suffix）"
+	/sbin/wifi reload >/dev/null 2>&1
+fi
+
+exit 0

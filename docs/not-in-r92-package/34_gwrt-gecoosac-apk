@@ -1,0 +1,18 @@
+#!/bin/sh
+# 预置集客 APK 离线安装（兼容分区漂移，外置数据已由 33 处理）
+APK_DIR="/tmp/gecoosac-apk"
+[ -d "$APK_DIR" ] || exit 0
+if command -v apk >/dev/null 2>&1; then
+	for f in "$APK_DIR"/*.apk; do
+		[ -f "$f" ] || continue
+		apk add --allow-untrusted "$f" 2>/dev/null || true
+	done
+else
+	for f in "$APK_DIR"/*.apk; do
+		[ -f "$f" ] || continue
+		opkg install "$f" 2>/dev/null || true
+	done
+fi
+# 清理缓存减轻 squashfs 残留
+rm -rf "$APK_DIR"
+exit 0

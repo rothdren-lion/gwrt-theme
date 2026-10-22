@@ -1,0 +1,12 @@
+#!/bin/sh
+echo 'Content-Type: application/json'
+echo ''
+case "${QUERY_STRING}" in
+  status)
+    /usr/libexec/gwrt-coremark status
+    ;;
+  *)
+    /usr/libexec/gwrt-coremark > /dev/null 2>&1
+    echo '{"status":"started"}'
+    ;;
+esac

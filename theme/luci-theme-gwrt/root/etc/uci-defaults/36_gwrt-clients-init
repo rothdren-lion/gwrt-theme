@@ -1,0 +1,20 @@
+#!/bin/sh
+# GWRT clients tracker — 全平台通用首次启动初始化
+# 适用所有 GWRT 设备 (re-cs-02 / gwrt2 / re-ss-01 / ...)
+
+# 启用 daemon (每次 boot 跑, 跟踪 ARP/assoc, 维护 /etc/gwrt/clients.json)
+if [ -x /etc/init.d/gwrt-clients ]; then
+	/etc/init.d/gwrt-clients enable 2>/dev/null
+	/etc/init.d/gwrt-clients start  2>/dev/null
+fi
+
+# 凌晨 0:00 cron: 清离线条目 + drop_caches
+CRON_FILE=/etc/crontabs/root
+mkdir -p /etc/crontabs
+touch "$CRON_FILE"
+if ! grep -q "/usr/share/gwrt/clients.sh cleanup-daily" "$CRON_FILE" 2>/dev/null; then
+	echo '0 0 * * * /usr/share/gwrt/clients.sh cleanup-daily' >> "$CRON_FILE"
+	/etc/init.d/cron restart 2>/dev/null || /etc/init.d/cron enable 2>/dev/null
+fi
+
+exit 0

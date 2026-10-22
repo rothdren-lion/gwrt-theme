@@ -1,0 +1,4 @@
+#!/bin/sh
+# 首次刷机自动同步 gecoosac APK/app（分区号自适应）
+[ -x /usr/libexec/gwrt-gecoosac-sync ] && /usr/libexec/gwrt-gecoosac-sync 2>/dev/null || true
+exit 0

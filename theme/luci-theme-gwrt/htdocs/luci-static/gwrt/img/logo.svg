@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48" role="img" aria-label="GWRT Logo">
+  <defs>
+    <!-- Brand gradient: blue → purple -->
+    <linearGradient id="brand-gradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%"   stop-color="#3b82f6"/>
+      <stop offset="100%" stop-color="#8b5cf6"/>
+    </linearGradient>
+    <!-- Inner glow -->
+    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="2" result="blur"/>
+      <feComposite in="SourceGraphic" in2="blur" operator="over"/>
+    </filter>
+    <!-- Clip to rounded square -->
+    <clipPath id="rounded-clip">
+      <rect x="0" y="0" width="48" height="48" rx="11" ry="11"/>
+    </clipPath>
+  </defs>
+
+  <!-- Background: gradient rounded square -->
+  <rect x="0" y="0" width="48" height="48" rx="11" ry="11" fill="url(#brand-gradient)"/>
+
+  <!-- Inner glow overlay -->
+  <rect x="0" y="0" width="48" height="48" rx="11" ry="11"
+        fill="rgba(255,255,255,0.12)" clip-path="url(#rounded-clip)"/>
+
+  <!-- Globe / network icon: stylized router emblem -->
+  <!-- Outer circle ring -->
+  <circle cx="24" cy="24" r="13" fill="none" stroke="white" stroke-width="2" opacity="0.9"/>
+
+  <!-- Horizontal ellipse (latitude line) -->
+  <ellipse cx="24" cy="24" rx="13" ry="5.5" fill="none" stroke="white" stroke-width="1.5" opacity="0.7"/>
+
+  <!-- Vertical meridian line -->
+  <line x1="24" y1="11" x2="24" y2="37" stroke="white" stroke-width="1.5" opacity="0.7"/>
+
+  <!-- Center dot -->
+  <circle cx="24" cy="24" r="2.5" fill="white" opacity="1"/>
+
+  <!-- Top signal arc -->
+  <path d="M18 8 Q24 5 30 8" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" opacity="0.6"/>
+</svg>

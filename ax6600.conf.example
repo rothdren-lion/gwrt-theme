@@ -1,0 +1,35 @@
+# ax6600.conf — GWRT AX6600 首次刷机自动恢复范本
+# 放入外置最后分区 apk/ 目录（/mnt/mmcblk*p*/apk/ax6600.conf 或 /mnt/apk/ax6600.conf）
+# 全部可选，缺省不改；首次刷机/重置生效，二次自动失效，可 cat /tmp/gwrt-apk-autoinstall.log 查看，打断：touch /tmp/gwrt-apk-autoinstall.abort
+
+# LAN 固定 IP（默认 192.168.10.1）
+lan_ip=192.168.9.9
+lan_netmask=255.255.255.0
+
+# WAN 三选一：
+# 1) pppoe
+wan_proto=pppoe
+wan_username=pppoe账号
+wan_password=pppoe密码
+# 2) dhcp
+#wan_proto=dhcp
+# 3) static
+#wan_proto=static
+#wan_ip=10.0.0.100
+#wan_netmask=255.255.255.0
+#wan_gateway=10.0.0.1
+#wan_dns="114.114.114.114 8.8.8.8"
+
+# WiFi 按频段（顺序 2.4G -> 5.8G -> 5.2G，AX6600 5.8G=IPQ6018 5.2G=QCN9074）
+wifi_2g_ssid=Rodren
+wifi_2g_key=Abc123abc!!
+wifi_5g_ssid=AX6600_Gaming
+wifi_5g_key=Abc123abc???
+# 5.2G 另起（可选，QCN 正常时生效）
+#wifi_5g2_ssid=AX6600_5G2
+#wifi_5g2_key=Abc123abc???
+
+# 通用兜底（未分频段时对所有 default_* 生效）
+#wifi_ssid=MyWifi
+#wifi_key=12345678
+#wifi_channel=auto

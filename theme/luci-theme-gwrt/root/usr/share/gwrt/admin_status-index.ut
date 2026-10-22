@@ -1,0 +1,10 @@
+{#
+ luci-theme-gwrt - admin_status/index dispatcher
+ - bootstrap (native) theme: render the stock LuCI status JS view
+ - gwrt theme: render the GWRT dashboard
+-#}
+{% if (theme == 'bootstrap'): %}
+{% include('view', {view: 'status/index'}) %}
+{% else %}
+{% include('admin_status/index_gwrt') %}
+{% endif %}

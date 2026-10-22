@@ -1,0 +1,38 @@
+#!/bin/sh
+
+# AP8220 lab DNS can return RFC2544 fake-ip (198.18/198.19) for GitHub.
+# That breaks router-local TLS downloads because the router itself is not using
+# the fake-ip proxy path. Only add a small /etc/hosts bypass when fake-ip DNS is
+# actually detected.
+
+HOSTS_FILE='/etc/hosts'
+BEGIN_MARK='# GWRT OTA GitHub DNS bypass BEGIN'
+END_MARK='# GWRT OTA GitHub DNS bypass END'
+
+is_fake_ip_dns() {
+	local host="$1"
+	nslookup "$host" 2>/dev/null | grep -Eq 'Address[^:]*:[[:space:]]+198\.1[89]\.'
+}
+
+if is_fake_ip_dns raw.githubusercontent.com || \
+	is_fake_ip_dns github.com || \
+	is_fake_ip_dns release-assets.githubusercontent.com; then
+	tmp="/tmp/hosts.gwrt-ota.$$"
+	awk -v begin="$BEGIN_MARK" -v end="$END_MARK" '
+		$0 == begin { skip = 1; next }
+		$0 == end { skip = 0; next }
+		!skip { print }
+	' "$HOSTS_FILE" > "$tmp" || exit 1
+	{
+		printf '%s\n' "$BEGIN_MARK"
+		printf '%s\n' '185.199.108.133 raw.githubusercontent.com'
+		printf '%s\n' '140.82.121.4 github.com'
+		printf '%s\n' '185.199.108.133 release-assets.githubusercontent.com'
+		printf '%s\n' "$END_MARK"
+	} >> "$tmp"
+	cp "$tmp" "$HOSTS_FILE" || exit 1
+	rm -f "$tmp"
+	/etc/init.d/dnsmasq reload >/dev/null 2>&1 || true
+fi
+
+exit 0

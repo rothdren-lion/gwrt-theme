@@ -1,0 +1,60 @@
+#!/bin/sh
+# Auto-add USB ethernet to the active LAN bridge.
+# Requires: gwrt.usb_lan.enabled=1 and auto_bridge=1
+
+. /lib/functions.sh
+
+log() {
+	logger -t "usb-lan" "$@"
+}
+
+[ "$ACTION" = "add" ] || exit 0
+[ -z "$DEVPATH" ] && exit 0
+
+# Check whether the operator enabled automatic bridge membership.
+config_load gwrt
+config_get_bool enabled usb_lan enabled 0
+config_get_bool auto_bridge usb_lan auto_bridge 1
+[ "$enabled" = "1" ] && [ "$auto_bridge" = "1" ] || exit 0
+
+# Only handle USB ethernet devices
+case "$INTERFACE" in
+	usb*|enx*|enp*s*u*) ;;
+	*) exit 0 ;;
+esac
+
+# Wait for interface to settle
+sleep 2
+
+# Resolve the bridge section from network.lan.device. Modern DSA layouts store
+# bridge members in a device section, not in the legacy network.lan.ifname.
+config_load network
+config_get lan_device lan device br-lan
+bridge_section=''
+for section in $(uci -q show network | sed -n 's/^network\.\([^=]*\)=device$/\1/p'); do
+	[ "$(uci -q get "network.$section.name")" = "$lan_device" ] || continue
+	[ "$(uci -q get "network.$section.type")" = "bridge" ] || continue
+	bridge_section="$section"
+	break
+done
+
+[ -n "$bridge_section" ] || {
+	log "LAN bridge section for $lan_device was not found; skipped $INTERFACE"
+	exit 0
+}
+
+for member in $(uci -q get "network.$bridge_section.ports"); do
+	[ "$member" = "$INTERFACE" ] && exit 0
+done
+
+uci -q add_list "network.$bridge_section.ports=$INTERFACE" || {
+	log "failed to add $INTERFACE to $lan_device"
+	exit 1
+}
+uci -q commit network || exit 1
+
+# Reload network to apply bridge changes
+/etc/init.d/network reload
+
+log "USB ethernet $INTERFACE added to $lan_device"
+exit 0

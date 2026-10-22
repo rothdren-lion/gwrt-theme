@@ -1,0 +1,92 @@
+﻿{#
+	GWRT is a modern dark-first LuCI theme inspired by gwrt.uk
+
+	luci-theme-gwrt
+	Copyright 2025 GWRT Contributors
+
+	Licensed to the public under the Apache License 2.0
+-#}
+
+{% 
+	import { access } from 'fs';
+	import { cursor } from 'uci';
+
+	const boardinfo = ubus.call("system", "board");
+	const hostname = striptags(boardinfo?.hostname ?? '?');
+
+	let cfg = cursor();
+
+	//send as HTML5
+	http.prepare_content('text/html; charset=UTF-8');
+
+	//Custom settings
+	let mode = 'dark';
+	let bar_color = '#0a0e1a';
+	if (access('/etc/config/gwrt')) {
+		mode = cfg.get_first('gwrt', 'theme', 'mode') ?? 'dark';
+		bar_color = (mode == 'light') ? '#f5f6fa' : '#0a0e1a';
+	}
+
+-%}
+<!DOCTYPE html>
+<html lang="{{ dispatcher.lang }}">
+
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+	<title>{{ hostname }}{{ node?.title ? ` - ${striptags(node.title)}` : '' }} - LuCI</title>
+
+	<!-- SEO and Description -->
+	<meta name="robots" content="noindex, nofollow">
+
+	<!-- Security -->
+	<meta http-equiv="X-Content-Type-Options" content="nosniff">
+	<meta http-equiv="X-Frame-Options" content="SAMEORIGIN">
+	<meta http-equiv="X-XSS-Protection" content="1; mode=block">
+	<meta http-equiv="Referrer-Policy" content="strict-origin-when-cross-origin">
+
+	<!-- Mobile and PWA -->
+	<meta name="format-detection" content="telephone=no, email=no">
+	<meta name="mobile-web-app-capable" content="yes">
+	<meta name="apple-mobile-web-app-capable" content="yes">
+	<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+	<meta name="apple-mobile-web-app-title" content="{{ hostname }} - LuCI">
+
+	<!-- Theme and Colors -->
+	<meta name="theme-color" content="{{ bar_color }}">
+	<meta name="msapplication-TileColor" content="{{ bar_color }}">
+	<meta name="application-name" content="{{ hostname }} - LuCI">
+
+	<!-- Icons -->
+	<link rel="icon" type="image/svg+xml" href="/luci-static/gwrt/img/logo.svg">
+	<link rel="shortcut icon" type="image/svg+xml" href="/luci-static/gwrt/img/logo.svg">
+
+	<!-- Font Preloads -->
+	<link rel="preload" href="/luci-static/gwrt/fonts/Inter-Regular.woff2" as="font" type="font/woff2" crossorigin>
+	<link rel="preload" href="/luci-static/gwrt/fonts/Inter-SemiBold.woff2" as="font" type="font/woff2" crossorigin>
+	<link rel="preload" href="/luci-static/gwrt/fonts/JetBrainsMono-Regular.woff2" as="font" type="font/woff2" crossorigin>
+
+	<!-- Anti-FOUC: set theme before paint -->
+	<script>
+		(function(){
+			var t;
+			try { t = localStorage.getItem('gwrt-theme'); } catch(e) {}
+			if (!t) t = '{{ mode }}' || 'dark';
+			document.documentElement.setAttribute('data-theme', t);
+		})();
+	</script>
+
+	<!-- Main Stylesheet -->
+	<link rel="stylesheet" href="/luci-static/gwrt/css/cascade.css?v=20260903r88">
+
+	{% if (node?.css): %}
+	<link rel="stylesheet" href="{{ resource }}/{{ node.css}}">
+	{% endif -%}
+	{% if (css): %}
+	<style title="text/css">
+		{{ css }}
+	</style>
+	{% endif -%}
+</head>
+
+<body>

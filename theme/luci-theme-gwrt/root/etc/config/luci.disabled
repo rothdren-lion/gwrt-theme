@@ -1,0 +1,3 @@
+# This file intentionally left empty.
+# luci config is provided by luci-base package.
+# gwrt theme registration is done via uci-defaults.

@@ -1,0 +1,35 @@
+#!/bin/sh
+# Dual-theme setup: GWRT theme on port 80 (global default), native LuCI
+# theme on ports 81/444. The theme-per-port lookup is done by the patched
+# luci-base runtime via gwrt.theme.port_<port> in /etc/config/gwrt.
+
+uci -q get uhttpd.main >/dev/null || exit 0
+
+# Bootstrap remains available only through the dedicated native ports. Do not
+# register it as a selectable global LuCI theme: that could flip port 80 away
+# from GWRT and make the dashboard hard to reach again.
+uci -q delete luci.themes.Bootstrap
+uci -q get gwrt.theme >/dev/null || uci -q set gwrt.theme='theme'
+uci -q set gwrt.theme.port_81='/luci-static/bootstrap'
+uci -q set gwrt.theme.port_444='/luci-static/bootstrap'
+uci -q commit luci
+uci -q commit gwrt
+
+has_listen() {
+	local section="$1" value="$2" entry
+	for entry in $(uci -q get "$section" 2>/dev/null); do
+		[ "$entry" = "$value" ] && return 0
+	done
+	return 1
+}
+
+has_listen 'uhttpd.main.listen_http' '0.0.0.0:81' || uci -q add_list uhttpd.main.listen_http='0.0.0.0:81'
+has_listen 'uhttpd.main.listen_http' '[::]:81' || uci -q add_list uhttpd.main.listen_http='[::]:81'
+has_listen 'uhttpd.main.listen_https' '0.0.0.0:443' || uci -q add_list uhttpd.main.listen_https='0.0.0.0:443'
+has_listen 'uhttpd.main.listen_https' '[::]:443' || uci -q add_list uhttpd.main.listen_https='[::]:443'
+has_listen 'uhttpd.main.listen_https' '0.0.0.0:444' || uci -q add_list uhttpd.main.listen_https='0.0.0.0:444'
+has_listen 'uhttpd.main.listen_https' '[::]:444' || uci -q add_list uhttpd.main.listen_https='[::]:444'
+
+uci -q commit uhttpd
+
+exit 0

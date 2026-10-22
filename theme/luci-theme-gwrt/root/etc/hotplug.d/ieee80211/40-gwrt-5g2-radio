@@ -1,0 +1,60 @@
+#!/bin/sh
+# GWRT 5.2G（QCN9074 PCIe）射频显式配置 — 2026-09-20
+#
+# 为什么必须显式配（2026-09-10 实机定位）：
+#   QCN9074 **只支持 5.2G（ch36-64）**。默认信道选择会把它配成 5.8G 的 ch157，
+#   hostapd 报 `Hardware does not support configured channel` → 该 radio 永不起。
+#   所以它的 channel/htmode/txpower/country 必须显式给定。
+#
+# 为什么不用 board.json 的 wlan.defaults.paths：
+#   jshn 的 json_load 不保留原始键名映射，会把 `platform/soc@0/...` 洗成
+#   `platform_soc_0_...`，而 mac80211.uc 用原始 phy.path 精确查找 → 永远匹配不上
+#   （192.168.9.9 实测确认，详见 board.d/04_defaults 注释）。
+#   且 band 级默认值（5g）会同时命中 5.8G 与 5.2G，无法区分。
+#   ⇒ 只能在 phy 出现后按**实际 uci 配置的 path + band** 判定角色再写。
+#
+# 范围：只配 5.2G（QCN9074）。2.4G / 5.8G 保持 OpenWrt 默认，不做任何策略改写。
+# 幂等：已是目标值就不写、不 reload。
+
+[ "$ACTION" = "add" ] || exit 0
+
+[ -x /sbin/wifi ] || exit 0
+
+. /lib/functions/gwrt-wireless.sh
+
+# 等 wifi config 建出 section（10-wifi-detect 与本脚本同目录，字母序在它之前）
+i=0
+while [ "$i" -lt 30 ]; do
+	uci -q show wireless 2>/dev/null | grep -q '=wifi-device' && break
+	sleep 1
+	i=$((i + 1))
+done
+uci -q show wireless 2>/dev/null | grep -q '=wifi-device' || exit 0
+
+changed=0
+
+set_radio_opt() {
+	[ "$(uci -q get "wireless.$1.$2")" = "$3" ] && return 0
+	uci -q set "wireless.$1.$2=$3" && changed=1
+}
+
+for radio in $(uci -q show wireless | sed -n 's/^\(wireless\.[^.]*\)=wifi-device$/\1/p' | cut -d. -f2); do
+	path="$(uci -q get "wireless.$radio.path")"
+	band="$(uci -q get "wireless.$radio.band")"
+
+	# 只处理 QCN9074（PCIe 5.2G）；6018 的 2.4G / 5.8G 不动
+	[ "$(gwrt_wifi_role "$path" "$band")" = "5.2G" ] || continue
+
+	set_radio_opt "$radio" channel 36      # 5.2G 起始信道
+	set_radio_opt "$radio" htmode HE160    # 160MHz
+	set_radio_opt "$radio" txpower 27      # 27 dBm
+	set_radio_opt "$radio" country US      # 国别（如需 00 改这里即可）
+done
+
+if [ "$changed" = "1" ]; then
+	uci -q commit wireless
+	logger -t gwrt-5g2 -p daemon.notice "QCN9074 5.2G 已配置为 ch36/HE160/27dBm/US"
+	/sbin/wifi reload >/dev/null 2>&1
+fi
+
+exit 0

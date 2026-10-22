@@ -1,0 +1,13 @@
+# Local dev artifacts — never publish
+docs/router-backups/
+docs/router-state/
+*.bak
+*.bak.*
+*-ppe
+
+# Build / editor noise
+*.o
+*.so
+.tmp/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,21 @@
+#!/bin/sh
+# GWRT: NFS —— 默认关闭可在 LuCI 手动开，路径与 SMB 同一数据分区
+SHARE="$(uci -q get gwrt.storage_mount)"; [ -n "$SHARE" ] || SHARE=/mnt/mmcblk0p27
+NET="$(uci -q get network.lan.ipaddr | cut -d. -f1-3)"; [ -n "$NET" ] || NET=192.168.3
+
+while uci -q get nfs.@share[0] >/dev/null 2>&1; do uci -q delete nfs.@share[0]; done
+uci -q set nfs.gwrt_share='share'
+uci -q set nfs.gwrt_share.enabled='0'                  # 默认不开，LuCI 手动开
+uci -q set nfs.gwrt_share.path="$SHARE"
+uci -q set nfs.gwrt_share.read_only='0'
+uci -q set nfs.gwrt_share.allowed_networks="$NET.0/24"
+uci -q set nfs.gwrt_share.sync_with_cache='0'
+uci -q set nfs.gwrt_share.insecure='1'
+uci -q commit nfs
+
+mkdir -p /etc/exportfs.d
+cat > /etc/exportfs.d/gwrt.exports <<EOF
+$SHARE $NET.0/24(rw,sync,no_subtree_check,no_root_squash,fsid=0)
+EOF
+logger -t 43_gwrt-nfs "NFS 导出 $SHARE 已配置（默认 disabled，LuCI 手开；/etc/exportfs.d/gwrt.exports）"
+exit 0

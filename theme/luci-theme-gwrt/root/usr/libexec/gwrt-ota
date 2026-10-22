@@ -1,0 +1,553 @@
+#!/bin/sh
+
+set -u
+
+WORKDIR="/tmp/gwrt-ota"
+MANIFEST="$WORKDIR/manifest.json"
+PACKAGE="$WORKDIR/update.tar.gz"
+IMAGE="$WORKDIR/sysupgrade.bin"
+LIST="$WORKDIR/package.list"
+DEFAULT_MANIFEST_URL="https://raw.githubusercontent.com/rothdren-lion/gwrt-ota/main/gwrt-ota/stable/gwrt-ota.json"
+DEFAULT_MANIFEST_BASE="${DEFAULT_MANIFEST_URL%/*}"
+FETCHED_MANIFEST_URL=""
+LEGACY_MANIFEST_FALLBACK="false"
+
+cleanup_retired_theme_files() {
+	rm -f /usr/share/ucode/luci/template/admin_status/index.ut.bak-src
+}
+
+json_escape() {
+	sed 's/\\/\\\\/g; s/"/\\"/g; s/	/\\t/g' | tr -d '\r'
+}
+
+json_get() {
+	local file="$1"
+	local expr="$2"
+
+	jsonfilter -q -i "$file" -e "$expr" 2>/dev/null
+}
+
+fail() {
+	local code="$1"
+	local msg="$2"
+
+	printf '{"ok":false,"error":"%s","message":"%s"}\n' \
+		"$(printf '%s' "$code" | json_escape)" \
+		"$(printf '%s' "$msg" | json_escape)"
+	exit 1
+}
+
+download() {
+	local url="$1"
+	local dest="$2"
+	local max_time="${3:-120}"
+	local rc=127
+
+	if command -v curl >/dev/null 2>&1; then
+		rm -f "$dest"
+		curl -4 -L --fail --silent --show-error --connect-timeout 10 --max-time "$max_time" -o "$dest" "$url" && return 0
+		rc=$?
+		[ "$rc" -eq 22 ] && return "$rc"
+		rm -f "$dest"
+		curl -L --fail --silent --show-error --connect-timeout 10 --max-time "$max_time" -o "$dest" "$url" && return 0
+		rc=$?
+		[ "$rc" -eq 22 ] && return "$rc"
+	fi
+	if command -v wget >/dev/null 2>&1; then
+		rm -f "$dest"
+		wget -4 -T 20 -O "$dest" "$url" && return 0
+		rc=$?
+		rm -f "$dest"
+		wget -T 20 -O "$dest" "$url" && return 0
+		rc=$?
+	fi
+	if command -v uclient-fetch >/dev/null 2>&1; then
+		rm -f "$dest"
+		uclient-fetch -4 -T 20 -O "$dest" "$url" && return 0
+		rc=$?
+		rm -f "$dest"
+		uclient-fetch -T 20 -O "$dest" "$url" && return 0
+		rc=$?
+	fi
+	return "$rc"
+}
+
+json_bool() {
+	local val="$1"
+	local def="$2"
+
+	case "$val" in
+		true|1|yes|on) printf true ;;
+		false|0|no|off) printf false ;;
+		*) printf '%s' "$def" ;;
+	esac
+}
+
+enabled() {
+	local v
+
+	v="$(uci -q get gwrt.ota.enabled 2>/dev/null || printf '1')"
+	[ "$v" != "0" ]
+}
+
+current_release() {
+	local desc=""
+	local rel_build applied_build applied_version
+
+	if [ -r /etc/openwrt_release ]; then
+		# shellcheck disable=SC1091
+		. /etc/openwrt_release
+		desc="${DISTRIB_DESCRIPTION:-${DISTRIB_RELEASE:-}}"
+	fi
+
+	[ -n "$desc" ] || desc="unknown"
+	rel_build="$(printf '%s\n' "$desc" | sed -n 's/.*V[0-9][0-9]*\.\([0-9][0-9]*\).*/\1/p' | head -n 1)"
+	applied_build="$(uci -q get gwrt.ota.applied_build 2>/dev/null || printf '0')"
+	applied_version="$(uci -q get gwrt.ota.applied_version 2>/dev/null || true)"
+	case "$rel_build" in *[!0-9]*|"") rel_build="0" ;; esac
+	case "$applied_build" in *[!0-9]*|"") applied_build="0" ;; esac
+	if [ "$applied_build" -gt "$rel_build" ] 2>/dev/null && [ -n "$applied_version" ]; then
+		desc="$applied_version"
+	fi
+	printf '%s' "$desc"
+}
+
+current_build() {
+	local rel applied_build
+
+	rel="$(current_release)"
+	rel="$(printf '%s\n' "$rel" | sed -n 's/.*V[0-9][0-9]*\.\([0-9][0-9]*\).*/\1/p' | head -n 1)"
+	applied_build="$(uci -q get gwrt.ota.applied_build 2>/dev/null || printf '0')"
+	case "$rel" in *[!0-9]*|"") rel="0" ;; esac
+	case "$applied_build" in *[!0-9]*|"") applied_build="0" ;; esac
+	if [ "$applied_build" -gt "$rel" ] 2>/dev/null; then
+		printf '%s' "$applied_build"
+	else
+		printf '%s' "$rel"
+	fi
+}
+
+target_board() {
+	local board=""
+
+	if [ -r /tmp/sysinfo/board_name ]; then
+		board="$(cat /tmp/sysinfo/board_name 2>/dev/null)"
+	fi
+
+	[ -n "$board" ] || board="unknown"
+	printf '%s' "$board"
+}
+
+target_name() {
+	local target=""
+
+	if [ -r /etc/openwrt_release ]; then
+		# shellcheck disable=SC1091
+		. /etc/openwrt_release
+		target="${DISTRIB_TARGET:-}"
+	fi
+
+	[ -n "$target" ] || target="unknown"
+	printf '%s' "$target"
+}
+
+configured_manifest_url() {
+	local url
+
+	url="$(uci -q get gwrt.ota.manifest_url 2>/dev/null || true)"
+	printf '%s' "$url"
+}
+
+manifest_base_url() {
+	local url
+
+	url="$(uci -q get gwrt.ota.manifest_base_url 2>/dev/null || true)"
+	[ -n "$url" ] || url="$DEFAULT_MANIFEST_BASE"
+	printf '%s' "${url%/}"
+}
+
+board_manifest_slug() {
+	target_board | sed 'y/ABCDEFGHIJKLMNOPQRSTUVWXYZ/abcdefghijklmnopqrstuvwxyz/; s/[^a-z0-9._-]/_/g'
+}
+
+manifest_url() {
+	local configured
+
+	configured="$(configured_manifest_url)"
+	if [ -n "$configured" ] && [ "$configured" != "$DEFAULT_MANIFEST_URL" ]; then
+		printf '%s' "$configured"
+	else
+		printf '%s/devices/%s.json' "$(manifest_base_url)" "$(board_manifest_slug)"
+	fi
+}
+
+manifest_channel() {
+	local channel
+
+	channel="$(uci -q get gwrt.ota.channel 2>/dev/null || true)"
+	[ -n "$channel" ] || channel="stable"
+	printf '%s' "$channel"
+}
+
+fetch_manifest_url() {
+	local url="$1"
+	local fetch_url nonce
+
+	[ -n "$url" ] || return 2
+	nonce="$(date +%s 2>/dev/null || printf '0')"
+	case "$url" in
+		*\?*) fetch_url="${url}&_=${nonce}" ;;
+		*) fetch_url="${url}?_=${nonce}" ;;
+	esac
+	download "$fetch_url" "$MANIFEST"
+}
+
+fetch_manifest() {
+	local url configured rc
+
+	mkdir -p "$WORKDIR" || return 1
+	FETCHED_MANIFEST_URL=""
+	LEGACY_MANIFEST_FALLBACK="false"
+	url="$(manifest_url)"
+	fetch_manifest_url "$url"
+	rc=$?
+	if [ "$rc" -eq 0 ]; then
+		FETCHED_MANIFEST_URL="$url"
+		return 0
+	fi
+
+	configured="$(configured_manifest_url)"
+	if [ -z "$configured" ] || [ "$configured" = "$DEFAULT_MANIFEST_URL" ]; then
+		fetch_manifest_url "$DEFAULT_MANIFEST_URL" || return $?
+		FETCHED_MANIFEST_URL="$DEFAULT_MANIFEST_URL"
+		LEGACY_MANIFEST_FALLBACK="true"
+		return 0
+	fi
+	return "$rc"
+}
+
+print_status() {
+	local url channel release build board target
+
+	url="$(manifest_url)"
+	channel="$(manifest_channel)"
+	release="$(current_release)"
+	build="$(current_build)"
+	board="$(target_board)"
+	target="$(target_name)"
+
+	printf '{"ok":true,"enabled":%s,"manifest_url":"%s","channel":"%s","current_version":"%s","current_build":%s,"board":"%s","target":"%s"}\n' \
+		"$(enabled && printf true || printf false)" \
+		"$(printf '%s' "$url" | json_escape)" \
+		"$(printf '%s' "$channel" | json_escape)" \
+		"$(printf '%s' "$release" | json_escape)" \
+		"$build" \
+		"$(printf '%s' "$board" | json_escape)" \
+		"$(printf '%s' "$target" | json_escape)"
+}
+
+check_update() {
+	local rc url channel release cur_build cur_board cur_target
+	local version build type file_url sha256 size reboot notes min_build board target remote_channel
+	local keep_config force_allowed reset_required manual_only
+	local update="false"
+	local reason=""
+
+	if ! enabled; then
+		print_status | sed 's/}$/,"update":false,"reason":"disabled"}/'
+		return 0
+	fi
+
+	url="$(manifest_url)"
+	if [ -z "$url" ]; then
+		print_status | sed 's/}$/,"update":false,"reason":"no_manifest_url"}/'
+		return 0
+	fi
+	command -v jsonfilter >/dev/null 2>&1 || fail "missing_jsonfilter" "jsonfilter is required for OTA manifest parsing"
+
+	fetch_manifest
+	rc=$?
+	[ "$rc" -eq 0 ] || fail "fetch_manifest" "Cannot download OTA manifest"
+	[ -n "$FETCHED_MANIFEST_URL" ] && url="$FETCHED_MANIFEST_URL"
+
+	version="$(json_get "$MANIFEST" '@.version')"
+	build="$(json_get "$MANIFEST" '@.build')"
+	type="$(json_get "$MANIFEST" '@.type')"
+	file_url="$(json_get "$MANIFEST" '@.url')"
+	sha256="$(json_get "$MANIFEST" '@.sha256')"
+	size="$(json_get "$MANIFEST" '@.size')"
+	reboot="$(json_get "$MANIFEST" '@.reboot')"
+	notes="$(json_get "$MANIFEST" '@.notes[0]')"
+	min_build="$(json_get "$MANIFEST" '@.min_build')"
+	board="$(json_get "$MANIFEST" '@.device')"
+	target="$(json_get "$MANIFEST" '@.target')"
+	remote_channel="$(json_get "$MANIFEST" '@.channel')"
+	keep_config="$(json_bool "$(json_get "$MANIFEST" '@.keep_config')" true)"
+	force_allowed="$(json_bool "$(json_get "$MANIFEST" '@.force_allowed')" false)"
+	reset_required="$(json_bool "$(json_get "$MANIFEST" '@.reset_required')" false)"
+	manual_only="$(json_bool "$(json_get "$MANIFEST" '@.manual_only')" false)"
+	channel="$(manifest_channel)"
+	release="$(current_release)"
+	cur_build="$(current_build)"
+	cur_board="$(target_board)"
+	cur_target="$(target_name)"
+
+	[ -n "$type" ] || type="patch"
+	[ -n "$build" ] || build="0"
+	[ -n "$min_build" ] || min_build="0"
+	[ -n "$size" ] || size="0"
+	[ -n "$reboot" ] || reboot="false"
+	case "$build" in *[!0-9]*|"") build="0" ;; esac
+	case "$min_build" in *[!0-9]*|"") min_build="0" ;; esac
+	case "$size" in *[!0-9]*|"") size="0" ;; esac
+	case "$reboot" in true|false) : ;; *) reboot="false" ;; esac
+
+	if [ -n "$remote_channel" ] && [ "$remote_channel" != "$channel" ]; then
+		reason="channel_mismatch"
+	elif [ -n "$board" ] && [ "$board" != "$cur_board" ]; then
+		if [ "$LEGACY_MANIFEST_FALLBACK" = "true" ]; then
+			reason="feed_unavailable"
+		else
+			reason="device_mismatch"
+		fi
+	elif [ -n "$target" ] && [ "$target" != "$cur_target" ]; then
+		reason="target_mismatch"
+	elif [ "$cur_build" -lt "$min_build" ] 2>/dev/null; then
+		reason="requires_full_upgrade"
+	elif [ "$build" -gt "$cur_build" ] 2>/dev/null; then
+		update="true"
+	else
+		reason="up_to_date"
+	fi
+
+	printf '{"ok":true,"enabled":true,"update":%s,"reason":"%s","current_version":"%s","current_build":%s,"version":"%s","build":%s,"type":"%s","url":"%s","sha256":"%s","size":%s,"reboot":%s,"keep_config":%s,"force_allowed":%s,"reset_required":%s,"manual_only":%s,"notes":"%s","channel":"%s","manifest_channel":"%s","board":"%s","target":"%s","manifest_device":"%s","manifest_target":"%s","manifest_url":"%s"}\n' \
+		"$update" \
+		"$(printf '%s' "$reason" | json_escape)" \
+		"$(printf '%s' "$release" | json_escape)" \
+		"$cur_build" \
+		"$(printf '%s' "$version" | json_escape)" \
+		"$build" \
+		"$(printf '%s' "$type" | json_escape)" \
+		"$(printf '%s' "$file_url" | json_escape)" \
+		"$(printf '%s' "$sha256" | json_escape)" \
+		"$size" \
+		"$reboot" \
+		"$keep_config" \
+		"$force_allowed" \
+		"$reset_required" \
+		"$manual_only" \
+		"$(printf '%s' "$notes" | json_escape)" \
+		"$(printf '%s' "$channel" | json_escape)" \
+		"$(printf '%s' "$remote_channel" | json_escape)" \
+		"$(printf '%s' "$cur_board" | json_escape)" \
+		"$(printf '%s' "$cur_target" | json_escape)" \
+		"$(printf '%s' "$board" | json_escape)" \
+		"$(printf '%s' "$target" | json_escape)" \
+		"$(printf '%s' "$url" | json_escape)"
+}
+
+validate_package_list() {
+	local path clean
+
+	tar -tzf "$PACKAGE" > "$LIST" 2>/dev/null || return 1
+	[ -s "$LIST" ] || return 1
+
+	while IFS= read -r path; do
+		[ -n "$path" ] || continue
+		clean="${path%/}"
+		case "$clean" in
+			""|.*|/*|*"/../"*|*".."*|*"$IFS"*)
+				return 1
+			;;
+		esac
+		case "$clean" in
+			www|www/luci-static|usr|usr/share|usr/share/ucode|usr/share/ucode/luci|usr/share/ucode/luci/template|usr/share/luci|usr/share/luci/menu.d|usr/share/rpcd|usr/share/rpcd/acl.d|usr/libexec|etc|etc/config|etc/uci-defaults|etc/init.d)
+				[ "$path" != "$clean" ] || return 1
+			;;
+			www/luci-static/*|usr/share/ucode/luci/template/*|usr/share/luci/menu.d/*|usr/share/rpcd/acl.d/*|usr/libexec/*|usr/lib/lua/luci/view/admin_network/app_filter.htm|etc/config/gwrt|etc/uci-defaults/*|etc/init.d/*)
+				:
+			;;
+			*)
+				return 1
+			;;
+		esac
+	done < "$LIST"
+}
+
+backup_existing_files() {
+	local backup path dir
+
+	backup="/etc/gwrt-ota/backups/$(date +%Y%m%d-%H%M%S)"
+	mkdir -p "$backup" || return 1
+
+	while IFS= read -r path; do
+		[ -n "$path" ] || continue
+		path="${path%/}"
+		[ -f "/$path" ] || continue
+		dir="$(dirname "$path")"
+		mkdir -p "$backup/$dir" || return 1
+		cp -p "/$path" "$backup/$path" || return 1
+	done < "$LIST"
+
+	printf '%s' "$backup"
+}
+
+queue_service_reload() {
+	(
+		sleep 2
+		[ -x /etc/init.d/rpcd ] && /etc/init.d/rpcd restart
+		[ -x /etc/init.d/uhttpd ] && /etc/init.d/uhttpd reload
+		[ -x /etc/init.d/uhttpd ] && /etc/init.d/uhttpd restart
+	) >/dev/null 2>&1 &
+}
+
+queue_reboot() {
+	(
+		sleep 3
+		sync
+		/sbin/reboot
+	) >/dev/null 2>&1 &
+}
+
+check_tmp_space() {
+	local size="$1"
+	local avail need
+
+	[ "$size" -gt 0 ] 2>/dev/null || return 0
+	avail="$(df -k "$WORKDIR" 2>/dev/null | awk 'NR==2 {print $4}')"
+	case "$avail" in *[!0-9]*|"") return 0 ;; esac
+	need=$((size / 1024 + 8192))
+	[ "$avail" -ge "$need" ]
+}
+
+queue_sysupgrade() {
+	local image="$1"
+	local keep_config="$2"
+	local reset_required="$3"
+	local force_requested="$4"
+	local force_allowed="$5"
+	local opts=""
+	local runner="$WORKDIR/run-sysupgrade.sh"
+
+	if [ "$force_requested" = "true" ]; then
+		[ "$force_allowed" = "true" ] || fail "force_not_allowed" "This firmware does not allow forced sysupgrade"
+		opts="$opts -F"
+	fi
+	if [ "$reset_required" = "true" ] || [ "$keep_config" = "false" ]; then
+		opts="$opts -n"
+	fi
+
+	cat > "$runner" <<EOF
+#!/bin/sh
+sleep 3
+exec /sbin/sysupgrade$opts "$image" >>/tmp/gwrt-ota-sysupgrade.log 2>&1
+EOF
+	chmod 700 "$runner" || return 1
+	"$runner" >/dev/null 2>&1 &
+	return 0
+}
+
+apply_update() {
+	local info update type file_url sha256 version build calc backup reboot size
+	local keep_config force_allowed reset_required manual_only force_requested="false"
+
+	case "${2:-}" in
+		force|--force) force_requested="true" ;;
+	esac
+
+	command -v jsonfilter >/dev/null 2>&1 || fail "missing_jsonfilter" "jsonfilter is required for OTA manifest parsing"
+
+	info="$(check_update)"
+	printf '%s' "$info" | grep -q '"ok":true' || fail "check_failed" "OTA check failed"
+	update="$(printf '%s\n' "$info" | jsonfilter -q -e '@.update' 2>/dev/null)"
+	type="$(printf '%s\n' "$info" | jsonfilter -q -e '@.type' 2>/dev/null)"
+	file_url="$(printf '%s\n' "$info" | jsonfilter -q -e '@.url' 2>/dev/null)"
+	sha256="$(printf '%s\n' "$info" | jsonfilter -q -e '@.sha256' 2>/dev/null)"
+	version="$(printf '%s\n' "$info" | jsonfilter -q -e '@.version' 2>/dev/null)"
+	build="$(printf '%s\n' "$info" | jsonfilter -q -e '@.build' 2>/dev/null)"
+	reboot="$(printf '%s\n' "$info" | jsonfilter -q -e '@.reboot' 2>/dev/null)"
+	size="$(printf '%s\n' "$info" | jsonfilter -q -e '@.size' 2>/dev/null)"
+	keep_config="$(printf '%s\n' "$info" | jsonfilter -q -e '@.keep_config' 2>/dev/null)"
+	force_allowed="$(printf '%s\n' "$info" | jsonfilter -q -e '@.force_allowed' 2>/dev/null)"
+	reset_required="$(printf '%s\n' "$info" | jsonfilter -q -e '@.reset_required' 2>/dev/null)"
+	manual_only="$(printf '%s\n' "$info" | jsonfilter -q -e '@.manual_only' 2>/dev/null)"
+	keep_config="$(json_bool "$keep_config" true)"
+	force_allowed="$(json_bool "$force_allowed" false)"
+	reset_required="$(json_bool "$reset_required" false)"
+	manual_only="$(json_bool "$manual_only" false)"
+	case "$size" in *[!0-9]*|"") size="0" ;; esac
+
+	[ "$update" = "true" ] || fail "up_to_date" "No OTA update available"
+	[ -n "$file_url" ] || fail "bad_manifest" "OTA package URL is empty"
+	[ -n "$sha256" ] || fail "bad_manifest" "OTA package sha256 is empty"
+	[ "$manual_only" != "true" ] || fail "manual_required" "This update must be installed manually"
+
+	if [ "$type" = "sysupgrade" ]; then
+		check_tmp_space "$size" || fail "no_space" "Not enough free space in /tmp for firmware download"
+		download "$file_url" "$IMAGE" 1800 || fail "fetch_firmware" "Cannot download sysupgrade firmware"
+		calc="$(sha256sum "$IMAGE" | awk '{print $1}')"
+		[ "$calc" = "$sha256" ] || fail "sha256_mismatch" "Sysupgrade firmware sha256 mismatch"
+		if [ "$force_requested" = "true" ]; then
+			[ "$force_allowed" = "true" ] || fail "force_not_allowed" "This firmware does not allow forced sysupgrade"
+			/sbin/sysupgrade -F -T "$IMAGE" > "$WORKDIR/image-check.log" 2>&1 || fail "image_check_failed" "Sysupgrade image validation failed"
+		else
+			/sbin/sysupgrade -T "$IMAGE" > "$WORKDIR/image-check.log" 2>&1 || fail "image_check_failed" "Sysupgrade image validation failed"
+		fi
+		queue_sysupgrade "$IMAGE" "$keep_config" "$reset_required" "$force_requested" "$force_allowed" || fail "queue_failed" "Cannot queue sysupgrade"
+		uci -q set gwrt.ota.pending_build="${build:-0}"
+		[ -n "$version" ] && uci -q set gwrt.ota.pending_version="$version"
+		uci -q commit gwrt
+		sync
+		printf '{"ok":true,"queued":true,"sysupgrade":true,"version":"%s","build":%s,"reboot":true,"keep_config":%s,"force":%s,"reset":%s}\n' \
+			"$(printf '%s' "$version" | json_escape)" \
+			"${build:-0}" \
+			"$keep_config" \
+			"$force_requested" \
+			"$reset_required"
+		return 0
+	fi
+
+	[ "$type" = "patch" ] || fail "manual_required" "This update must be installed manually"
+	download "$file_url" "$PACKAGE" || fail "fetch_package" "Cannot download OTA package"
+	calc="$(sha256sum "$PACKAGE" | awk '{print $1}')"
+	[ "$calc" = "$sha256" ] || fail "sha256_mismatch" "OTA package sha256 mismatch"
+	validate_package_list || fail "unsafe_package" "OTA package contains unsupported paths"
+	backup="$(backup_existing_files)" || fail "backup_failed" "Cannot backup current files"
+	tar -xzf "$PACKAGE" -C / || fail "extract_failed" "Cannot extract OTA package"
+	while IFS= read -r path; do
+		path="${path%/}"
+		[ -e "/$path" ] && chown root:root "/$path" >/dev/null 2>&1
+	done < "$LIST"
+	uci -q set gwrt.ota.applied_build="${build:-0}"
+	[ -n "$version" ] && uci -q set gwrt.ota.applied_version="$version"
+	uci -q commit gwrt
+	sync
+	if [ "$reboot" = "true" ]; then
+		queue_reboot
+	else
+		queue_service_reload
+	fi
+
+	printf '{"ok":true,"applied":true,"version":"%s","build":%s,"backup":"%s","reboot":%s}\n' \
+		"$(printf '%s' "$version" | json_escape)" \
+		"${build:-0}" \
+		"$(printf '%s' "$backup" | json_escape)" \
+		"${reboot:-false}"
+}
+
+cleanup_retired_theme_files
+
+case "${1:-status}" in
+	status)
+		print_status
+	;;
+	check)
+		check_update
+	;;
+	apply)
+		apply_update "$@"
+	;;
+	*)
+		fail "usage" "Usage: gwrt-ota status|check|apply"
+	;;
+esac

@@ -1,0 +1,811 @@
+#!/bin/sh
+# gwrt-container - authenticated container runtime information and settings.
+# The theme has no Docker/Podman dependency. This endpoint detects a runtime at
+# request time and uses only its native, persistent configuration format.
+
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+set -f
+
+GWRT_MAX_BODY=16384
+GWRT_BROWSE_MAX_ENTRIES=200
+GWRT_LOCK_DIR=/tmp/gwrt-container.lock
+GWRT_ENGINE=
+GWRT_DATA_PATH=
+GWRT_RUNNING_IDS=
+GWRT_PODMAN_STORAGE_BACKUP=0
+GWRT_PODMAN_REGISTRY_BACKUP=0
+GWRT_DOCKER_BACKUP=0
+
+json_escape() {
+	printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g; s/	/\\t/g'
+}
+
+json_quote() {
+	printf '"'
+	json_escape "$1"
+	printf '"'
+}
+
+json_array_lines() {
+	local gwrt_first=1 gwrt_line
+
+	printf '['
+	while IFS= read -r gwrt_line || [ -n "$gwrt_line" ]; do
+		[ -n "$gwrt_line" ] || continue
+		[ "$gwrt_first" -eq 1 ] || printf ','
+		json_quote "$gwrt_line"
+		gwrt_first=0
+	done
+	printf ']'
+}
+
+json_array_command() {
+	local gwrt_first=1
+
+	printf '['
+	"$@" 2>/dev/null | while IFS= read -r gwrt_line || [ -n "$gwrt_line" ]; do
+		[ -n "$gwrt_line" ] || continue
+		[ "$gwrt_first" -eq 1 ] || printf ','
+		printf '%s' "$gwrt_line"
+		gwrt_first=0
+	done
+	printf ']'
+}
+
+json_array_podman() {
+	local gwrt_output
+
+	gwrt_output=$("$@" 2>/dev/null)
+	case "$gwrt_output" in
+		\[*\]) printf '%s' "$gwrt_output" ;;
+		*) printf '[]' ;;
+	esac
+}
+
+json_header() {
+	printf 'Content-Type: application/json\r\n'
+	printf 'Cache-Control: no-store\r\n\r\n'
+}
+
+api_error() {
+	json_header
+	printf '{"ok":false,"error":'
+	json_quote "$1"
+	printf '}\n'
+	exit 0
+}
+
+query_raw() {
+	printf '%s' "$QUERY_STRING" | tr '&' '\n' | sed -n "s/^$1=//p" | sed -n '1p'
+}
+
+url_decode() {
+	local gwrt_encoded
+
+	gwrt_encoded=$(printf '%s' "$1" | sed 's/+/ /g; s/%/\\x/g')
+	printf '%b' "$gwrt_encoded"
+}
+
+form_raw() {
+	printf '%s' "$GWRT_FORM_BODY" | tr '&' '\n' | sed -n "s/^$1=//p" | sed -n '1p'
+}
+
+form_value() {
+	url_decode "$(form_raw "$1")"
+}
+
+valid_session() {
+	local gwrt_sid="$1"
+
+	case "$gwrt_sid" in
+		''|*[!A-Za-z0-9]*) return 1 ;;
+	esac
+
+	ubus call session get "{ \"ubus_rpc_session\": \"$gwrt_sid\" }" >/dev/null 2>&1
+}
+
+detect_engine() {
+	if [ -x /usr/bin/podman ]; then
+		GWRT_ENGINE=podman
+	elif [ -x /usr/bin/docker ]; then
+		GWRT_ENGINE=docker
+	else
+		return 1
+	fi
+
+	return 0
+}
+
+engine_data_path() {
+	case "$GWRT_ENGINE" in
+		podman) podman info --format '{{.Store.GraphRoot}}' 2>/dev/null ;;
+		docker) docker info --format '{{.DockerRootDir}}' 2>/dev/null ;;
+	esac
+}
+
+engine_version() {
+	case "$GWRT_ENGINE" in
+		podman) podman version --format '{{.Client.Version}}' 2>/dev/null ;;
+		docker) docker version --format '{{.Server.Version}}' 2>/dev/null ;;
+	esac
+}
+
+engine_config_path() {
+	case "$GWRT_ENGINE" in
+		podman) printf '%s' '/etc/containers/storage.conf' ;;
+		docker) printf '%s' '/etc/config/dockerd' ;;
+	esac
+}
+
+podman_mirrors() {
+	[ -r /etc/containers/registries.conf ] || return 0
+	awk '
+		/^\[\[registry\.mirror\]\]$/ { in_mirror = 1; next }
+		in_mirror && /^[[:space:]]*location[[:space:]]*=/ {
+			value = $0
+			sub(/^[[:space:]]*location[[:space:]]*=[[:space:]]*"/, "", value)
+			sub(/"[[:space:]]*$/, "", value)
+			# The managed block also emits a docker.io/library mirror per entry;
+			# do not surface it as a second, unsavable mirror.
+			if (value != "" && value !~ /\/library$/) print "https://" value
+			in_mirror = 0
+		}
+	' /etc/containers/registries.conf
+}
+
+docker_mirrors() {
+	uci -q get dockerd.globals.registry_mirrors 2>/dev/null | tr ' ' '\n'
+}
+
+engine_mirrors() {
+	case "$GWRT_ENGINE" in
+		podman) podman_mirrors ;;
+		docker) docker_mirrors ;;
+	esac
+}
+
+engine_containers_json() {
+	case "$GWRT_ENGINE" in
+		podman) json_array_podman podman ps -a --format json ;;
+		docker) json_array_command docker ps -a --format '{{json .}}' ;;
+	esac
+}
+
+engine_images_json() {
+	case "$GWRT_ENGINE" in
+		podman) json_array_podman podman images --format json ;;
+		docker) json_array_command docker image ls --format '{{json .}}' ;;
+	esac
+}
+
+engine_running_ids() {
+	case "$GWRT_ENGINE" in
+		podman) podman ps -q 2>/dev/null ;;
+		docker) docker ps -q 2>/dev/null ;;
+	esac
+}
+
+engine_volume_count() {
+	case "$GWRT_ENGINE" in
+		podman) podman volume ls -q 2>/dev/null | awk 'NF { count++ } END { print count + 0 }' ;;
+		docker) docker volume ls -q 2>/dev/null | awk 'NF { count++ } END { print count + 0 }' ;;
+	esac
+}
+
+engine_stop_service() {
+	case "$GWRT_ENGINE" in
+		podman) [ -x /etc/init.d/podman ] && /etc/init.d/podman stop >/dev/null 2>&1 ;;
+		docker) [ -x /etc/init.d/dockerd ] && /etc/init.d/dockerd stop >/dev/null 2>&1 ;;
+	esac
+	return 0
+}
+
+engine_start_service() {
+	local gwrt_wait=0
+
+	case "$GWRT_ENGINE" in
+		podman)
+			[ -x /etc/init.d/podman ] || return 0
+			/etc/init.d/podman start >/dev/null 2>&1 || return 1
+			;;
+		docker)
+			[ -x /etc/init.d/dockerd ] || return 0
+			/etc/init.d/dockerd start >/dev/null 2>&1 || return 1
+			;;
+	esac
+
+	while [ "$gwrt_wait" -lt 15 ]; do
+		case "$GWRT_ENGINE" in
+			podman) podman info >/dev/null 2>&1 && return 0 ;;
+			docker) docker info >/dev/null 2>&1 && return 0 ;;
+		esac
+		gwrt_wait=$((gwrt_wait + 1))
+		sleep 1
+	done
+
+	return 1
+}
+
+engine_stop_containers() {
+	[ -n "$GWRT_RUNNING_IDS" ] || return 0
+	case "$GWRT_ENGINE" in
+		podman) podman stop --time 15 $GWRT_RUNNING_IDS >/dev/null 2>&1 ;;
+		docker) docker stop --time 15 $GWRT_RUNNING_IDS >/dev/null 2>&1 ;;
+	esac
+}
+
+engine_start_containers() {
+	[ -n "$GWRT_RUNNING_IDS" ] || return 0
+	case "$GWRT_ENGINE" in
+		podman) podman start $GWRT_RUNNING_IDS >/dev/null 2>&1 ;;
+		docker) docker start $GWRT_RUNNING_IDS >/dev/null 2>&1 ;;
+	esac
+}
+
+legacy_registry_list() {
+	local gwrt_section="$1"
+
+	sed -n "/^\[registries\.${gwrt_section}\]/,/^\[/p" /etc/containers/registries.conf 2>/dev/null \
+		| sed -n 's/.*registries[[:space:]]*=[[:space:]]*\[\(.*\)\].*/\1/p' \
+		| tr ',' '\n' \
+		| tr -d " '\""
+}
+
+toml_array() {
+	local gwrt_first=1 gwrt_item
+
+	printf '['
+	while IFS= read -r gwrt_item || [ -n "$gwrt_item" ]; do
+		[ -n "$gwrt_item" ] || continue
+		[ "$gwrt_first" -eq 1 ] || printf ', '
+		printf '"%s"' "$(printf '%s' "$gwrt_item" | sed 's/\\/\\\\/g; s/"/\\"/g')"
+		gwrt_first=0
+	done <<EOF
+$1
+EOF
+	printf ']'
+}
+
+write_podman_mirror_block() {
+	local gwrt_mirrors="$1" gwrt_mirror gwrt_location
+
+	printf '# GWRT_CONTAINER_MIRRORS_BEGIN\n'
+	if [ -n "$gwrt_mirrors" ]; then
+		printf '[[registry]]\n'
+		printf 'prefix = "docker.io"\n'
+		printf 'location = "docker.io"\n'
+		while IFS= read -r gwrt_mirror || [ -n "$gwrt_mirror" ]; do
+			[ -n "$gwrt_mirror" ] || continue
+			gwrt_location=${gwrt_mirror#https://}
+			printf '\n[[registry.mirror]]\n'
+			printf 'location = "%s"\n' "$gwrt_location"
+		done <<EOF
+$gwrt_mirrors
+EOF
+		printf '\n[[registry]]\n'
+		printf 'prefix = "docker.io/library"\n'
+		printf 'location = "docker.io/library"\n'
+		while IFS= read -r gwrt_mirror || [ -n "$gwrt_mirror" ]; do
+			[ -n "$gwrt_mirror" ] || continue
+			gwrt_location=${gwrt_mirror#https://}
+			printf '\n[[registry.mirror]]\n'
+			printf 'location = "%s/library"\n' "$gwrt_location"
+		done <<EOF
+$gwrt_mirrors
+EOF
+	fi
+	printf '# GWRT_CONTAINER_MIRRORS_END\n'
+}
+
+write_podman_registry_config() {
+	local gwrt_mirrors="$1" gwrt_config=/etc/containers/registries.conf
+	local gwrt_backup=/etc/containers/registries.conf.gwrt-backup gwrt_tmp
+
+	[ -r "$gwrt_config" ] || return 1
+	cp -a "$gwrt_config" "$gwrt_backup" || return 1
+	GWRT_PODMAN_REGISTRY_BACKUP=1
+	gwrt_tmp=$(mktemp /tmp/gwrt-registries.XXXXXX) || return 1
+
+	if grep -q '^# GWRT_CONTAINER_MIRRORS_BEGIN$' "$gwrt_config"; then
+		awk '
+			/^# GWRT_CONTAINER_MIRRORS_BEGIN$/ { skip = 1; next }
+			/^# GWRT_CONTAINER_MIRRORS_END$/ { skip = 0; next }
+			!skip { print }
+		' "$gwrt_config" > "$gwrt_tmp" || return 1
+		write_podman_mirror_block "$gwrt_mirrors" >> "$gwrt_tmp"
+	elif grep -q '^\[registries\.' "$gwrt_config"; then
+		if legacy_registry_list insecure | grep -qx 'docker.io' \
+			|| legacy_registry_list block | grep -qx 'docker.io'; then
+			rm -f "$gwrt_tmp"
+			return 1
+		fi
+		{
+			printf '# Managed by GWRT. Original legacy config: %s\n' "$gwrt_backup"
+			printf 'unqualified-search-registries = '
+			toml_array "$(legacy_registry_list search)"
+			printf '\n\n'
+			legacy_registry_list insecure | while IFS= read -r gwrt_registry; do
+				[ -n "$gwrt_registry" ] || continue
+				printf '[[registry]]\nlocation = "%s"\ninsecure = true\n\n' "$gwrt_registry"
+			done
+			legacy_registry_list block | while IFS= read -r gwrt_registry; do
+				[ -n "$gwrt_registry" ] || continue
+				printf '[[registry]]\nlocation = "%s"\nblocked = true\n\n' "$gwrt_registry"
+			done
+			write_podman_mirror_block "$gwrt_mirrors"
+		} > "$gwrt_tmp"
+	else
+		rm -f "$gwrt_tmp"
+		return 1
+	fi
+
+	mv "$gwrt_tmp" "$gwrt_config" || return 1
+	podman info >/dev/null 2>&1 || return 1
+	return 0
+}
+
+write_podman_data_path() {
+	local gwrt_path="$1" gwrt_config=/etc/containers/storage.conf
+	local gwrt_backup=/etc/containers/storage.conf.gwrt-backup gwrt_tmp
+
+	[ -r "$gwrt_config" ] || return 1
+	cp -a "$gwrt_config" "$gwrt_backup" || return 1
+	GWRT_PODMAN_STORAGE_BACKUP=1
+	gwrt_tmp=$(mktemp /tmp/gwrt-storage.XXXXXX) || return 1
+	awk -v path="$gwrt_path" '
+		BEGIN { in_storage = 0; replaced = 0 }
+		/^\[storage\][[:space:]]*$/ { in_storage = 1; print; next }
+		/^\[/ {
+			if (in_storage && !replaced) { print "graphroot = \"" path "\""; replaced = 1 }
+			in_storage = 0
+		}
+		{
+			if (in_storage && /^[[:space:]]*graphroot[[:space:]]*=/) {
+				if (!replaced) { print "graphroot = \"" path "\""; replaced = 1 }
+				next
+			}
+			print
+		}
+		END { if (in_storage && !replaced) print "graphroot = \"" path "\"" }
+	' "$gwrt_config" > "$gwrt_tmp" || return 1
+	mv "$gwrt_tmp" "$gwrt_config" || return 1
+	return 0
+}
+
+write_docker_settings() {
+	local gwrt_path="$1" gwrt_mirrors="$2" gwrt_mirror
+	local gwrt_config=/etc/config/dockerd gwrt_backup=/etc/config/dockerd.gwrt-backup
+
+	if [ ! -r "$gwrt_config" ]; then
+		# The docker CLI package alone ships no UCI config. Create the section
+		# the dockerd init script expects instead of failing the save.
+		: > "$gwrt_config" 2>/dev/null || return 1
+		uci -q set dockerd.globals=globals || return 1
+	else
+		cp -a "$gwrt_config" "$gwrt_backup" || return 1
+		GWRT_DOCKER_BACKUP=1
+	fi
+	uci -q set dockerd.globals.data_root="$gwrt_path" || return 1
+	uci -q delete dockerd.globals.registry_mirrors
+	while IFS= read -r gwrt_mirror || [ -n "$gwrt_mirror" ]; do
+		[ -n "$gwrt_mirror" ] || continue
+		uci -q add_list dockerd.globals.registry_mirrors="$gwrt_mirror" || return 1
+	done <<EOF
+$gwrt_mirrors
+EOF
+	uci -q commit dockerd
+}
+
+restore_engine_config() {
+	if [ "$GWRT_ENGINE" = podman ]; then
+		[ "$GWRT_PODMAN_STORAGE_BACKUP" -eq 1 ] && cp -a /etc/containers/storage.conf.gwrt-backup /etc/containers/storage.conf
+		[ "$GWRT_PODMAN_REGISTRY_BACKUP" -eq 1 ] && cp -a /etc/containers/registries.conf.gwrt-backup /etc/containers/registries.conf
+	elif [ "$GWRT_ENGINE" = docker ] && [ "$GWRT_DOCKER_BACKUP" -eq 1 ]; then
+		cp -a /etc/config/dockerd.gwrt-backup /etc/config/dockerd
+	fi
+}
+
+normalize_mirror() {
+	local gwrt_value="$1" gwrt_host
+
+	gwrt_value=$(printf '%s' "$gwrt_value" | tr -d '\r')
+	gwrt_value=${gwrt_value%/}
+	case "$gwrt_value" in
+		https://*) ;;
+		*) return 1 ;;
+	esac
+	gwrt_host=${gwrt_value#https://}
+	case "$gwrt_host" in
+		''|*/*|.*|*..*|*[!A-Za-z0-9.:-]*) return 1 ;;
+	esac
+	printf '%s' "$gwrt_value"
+}
+
+normalize_mirrors() {
+	local gwrt_source="$1" gwrt_value gwrt_normalized gwrt_output=
+
+	while IFS= read -r gwrt_value || [ -n "$gwrt_value" ]; do
+		[ -n "$gwrt_value" ] || continue
+		gwrt_normalized=$(normalize_mirror "$gwrt_value") || return 1
+		case "
+$gwrt_output
+" in
+			*"
+$gwrt_normalized
+"*) ;;
+			*) gwrt_output="${gwrt_output}${gwrt_output:+
+}$gwrt_normalized" ;;
+		esac
+	done <<EOF
+$gwrt_source
+EOF
+	printf '%s' "$gwrt_output"
+}
+
+normalize_data_path() {
+	local gwrt_path="$1" gwrt_mount gwrt_parent gwrt_next gwrt_fstype
+
+	case "$gwrt_path" in
+		/*) ;;
+		*) return 1 ;;
+	esac
+	case "$gwrt_path" in
+		/|/tmp|/tmp/*|/proc|/proc/*|/sys|/sys/*|/dev|/dev/*|/rom|/rom/*|/overlay|/overlay/*) return 1 ;;
+	esac
+	case "$gwrt_path" in
+		*[!A-Za-z0-9_./@:+-]*) return 1 ;;
+	esac
+	# Do not create a requested directory until its nearest existing parent is
+	# known to be a non-volatile mounted filesystem.
+	gwrt_parent=$gwrt_path
+	while [ ! -d "$gwrt_parent" ]; do
+		gwrt_next=$(dirname "$gwrt_parent")
+		[ "$gwrt_next" != "$gwrt_parent" ] || return 1
+		gwrt_parent=$gwrt_next
+	done
+	gwrt_mount=$(df -P "$gwrt_parent" 2>/dev/null | awk 'NR == 2 { print $6 }')
+	case "$gwrt_mount" in
+		''|/|/tmp|/rom|/overlay|/overlay/*) return 1 ;;
+	esac
+	gwrt_fstype=$(awk -v mount="$gwrt_mount" '$2 == mount { print $3; exit }' /proc/mounts 2>/dev/null)
+	case "$gwrt_fstype" in
+		tmpfs|ramfs|overlay|squashfs) return 1 ;;
+	esac
+	mkdir -p "$gwrt_path" 2>/dev/null || return 1
+	gwrt_path=$(cd "$gwrt_path" 2>/dev/null && pwd -P) || return 1
+	gwrt_mount=$(df -P "$gwrt_path" 2>/dev/null | awk 'NR == 2 { print $6 }')
+	case "$gwrt_mount" in
+		''|/|/tmp|/rom|/overlay|/overlay/*) return 1 ;;
+	esac
+	gwrt_fstype=$(awk -v mount="$gwrt_mount" '$2 == mount { print $3; exit }' /proc/mounts 2>/dev/null)
+	case "$gwrt_fstype" in
+		tmpfs|ramfs|overlay|squashfs) return 1 ;;
+	esac
+	: > "$gwrt_path/.gwrt-container-write-test.$$" 2>/dev/null || return 1
+	rm -f "$gwrt_path/.gwrt-container-write-test.$$"
+	printf '%s' "$gwrt_path"
+}
+
+browse_path_characters() {
+	case "$1" in
+		/*) ;;
+		*) return 1 ;;
+	esac
+	case "$1" in
+		*[!A-Za-z0-9_./@:+-]*) return 1 ;;
+	esac
+	return 0
+}
+
+# Only expose mount points that can pass the data-path validation. The browser
+# deliberately omits volatile and system filesystems instead of presenting
+# locations that saving would reject later.
+persistent_mounts() {
+	local gwrt_device gwrt_mount gwrt_fstype gwrt_rest
+
+	while IFS=' ' read -r gwrt_device gwrt_mount gwrt_fstype gwrt_rest; do
+		case "$gwrt_mount" in
+			/|/tmp|/tmp/*|/run|/run/*|/var/run|/var/run/*|/proc|/proc/*|/sys|/sys/*|/dev|/dev/*|/rom|/rom/*|/overlay|/overlay/*|*\\*) continue ;;
+		esac
+		case "$gwrt_mount" in
+			*[!A-Za-z0-9_./@:+-]*) continue ;;
+		esac
+		case "$gwrt_fstype" in
+			tmpfs|ramfs|overlay|squashfs|proc|sysfs|devtmpfs|devpts|cgroup|cgroup2|mqueue|pstore|debugfs|tracefs|securityfs|configfs) continue ;;
+		esac
+		[ -d "$gwrt_mount" ] && printf '%s\n' "$gwrt_mount"
+	done </proc/mounts | sort -u
+}
+
+mount_is_persistent() {
+	local gwrt_candidate="$1" gwrt_mount
+
+	while IFS= read -r gwrt_mount || [ -n "$gwrt_mount" ]; do
+		[ "$gwrt_mount" = "$gwrt_candidate" ] && return 0
+	done <<EOF
+$(persistent_mounts)
+EOF
+	return 1
+}
+
+browse_directory_path() {
+	local gwrt_path="$1" gwrt_mount
+
+	browse_path_characters "$gwrt_path" || return 1
+	[ -d "$gwrt_path" ] || return 1
+	gwrt_path=$(cd "$gwrt_path" 2>/dev/null && pwd -P) || return 1
+	browse_path_characters "$gwrt_path" || return 1
+	gwrt_mount=$(df -P "$gwrt_path" 2>/dev/null | awk 'NR == 2 { print $6 }')
+	mount_is_persistent "$gwrt_mount" || return 1
+	printf '%s' "$gwrt_path"
+}
+
+json_browse_entry() {
+	local gwrt_path="$1" gwrt_name
+
+	gwrt_name=$(basename "$gwrt_path")
+	printf '{"name":'
+	json_quote "$gwrt_name"
+	printf ',"path":'
+	json_quote "$gwrt_path"
+	printf '}'
+}
+
+json_browse_mount_entry() {
+	local gwrt_path="$1" gwrt_name gwrt_fstype gwrt_size gwrt_available
+
+	gwrt_name=$(basename "$gwrt_path")
+	gwrt_fstype=$(awk -v mount="$gwrt_path" '$2 == mount { print $3; exit }' /proc/mounts 2>/dev/null)
+	gwrt_size=$(df -P "$gwrt_path" 2>/dev/null | awk 'NR == 2 { print $2 }')
+	gwrt_available=$(df -P "$gwrt_path" 2>/dev/null | awk 'NR == 2 { print $4 }')
+	printf '{"name":'
+	json_quote "$gwrt_name"
+	printf ',"path":'
+	json_quote "$gwrt_path"
+	printf ',"mount":true,"fstype":'
+	json_quote "$gwrt_fstype"
+	printf ',"sizeKiB":'
+	json_quote "$gwrt_size"
+	printf ',"availableKiB":'
+	json_quote "$gwrt_available"
+	printf '}'
+}
+
+json_browse_entries() {
+	local gwrt_directory="$1" gwrt_entry gwrt_first=1
+
+	printf '['
+	while IFS= read -r gwrt_entry || [ -n "$gwrt_entry" ]; do
+		browse_path_characters "$gwrt_entry" || continue
+		[ -d "$gwrt_entry" ] || continue
+		[ "$gwrt_first" -eq 1 ] || printf ','
+		json_browse_entry "$gwrt_entry"
+		gwrt_first=0
+	done <<EOF
+$(find "$gwrt_directory" -mindepth 1 -maxdepth 1 -type d -print 2>/dev/null | sort | sed -n "1,${GWRT_BROWSE_MAX_ENTRIES}p")
+EOF
+	printf ']'
+}
+
+json_browse_mounts() {
+	local gwrt_mount gwrt_first=1
+
+	printf '['
+	while IFS= read -r gwrt_mount || [ -n "$gwrt_mount" ]; do
+		[ "$gwrt_first" -eq 1 ] || printf ','
+		json_browse_mount_entry "$gwrt_mount"
+		gwrt_first=0
+	done <<EOF
+$(persistent_mounts)
+EOF
+	printf ']'
+}
+
+emit_browse() {
+	local gwrt_requested="$1" gwrt_path= gwrt_parent=
+
+	if [ -n "$gwrt_requested" ]; then
+		gwrt_path=$(browse_directory_path "$gwrt_requested") \
+			|| api_error 'The selected directory is not on a mounted persistent filesystem.'
+		if ! mount_is_persistent "$gwrt_path"; then
+			gwrt_parent=$(dirname "$gwrt_path")
+		fi
+	fi
+
+	json_header
+	printf '{"ok":true,"action":"browse","path":'
+	json_quote "$gwrt_path"
+	printf ',"parent":'
+	json_quote "$gwrt_parent"
+	printf ',"entries":'
+	if [ -n "$gwrt_path" ]; then
+		json_browse_entries "$gwrt_path"
+	else
+		json_browse_mounts
+	fi
+	printf '}\n'
+}
+
+path_has_data() {
+	[ -n "$(find "$1" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]
+}
+
+emit_info() {
+	local gwrt_message="$1" gwrt_version gwrt_config gwrt_size gwrt_used gwrt_available gwrt_percent gwrt_mount
+
+	GWRT_DATA_PATH=$(engine_data_path)
+	gwrt_version=$(engine_version)
+	gwrt_config=$(engine_config_path)
+	gwrt_size=$(df -P "$GWRT_DATA_PATH" 2>/dev/null | awk 'NR == 2 { print $2 }')
+	gwrt_used=$(df -P "$GWRT_DATA_PATH" 2>/dev/null | awk 'NR == 2 { print $3 }')
+	gwrt_available=$(df -P "$GWRT_DATA_PATH" 2>/dev/null | awk 'NR == 2 { print $4 }')
+	gwrt_percent=$(df -P "$GWRT_DATA_PATH" 2>/dev/null | awk 'NR == 2 { print $5 }')
+	gwrt_mount=$(df -P "$GWRT_DATA_PATH" 2>/dev/null | awk 'NR == 2 { print $6 }')
+
+	json_header
+	printf '{"ok":true,"engine":'
+	json_quote "$GWRT_ENGINE"
+	printf ',"version":'
+	json_quote "$gwrt_version"
+	printf ',"dataPath":'
+	json_quote "$GWRT_DATA_PATH"
+	printf ',"configPath":'
+	json_quote "$gwrt_config"
+	printf ',"mirrors":'
+	engine_mirrors | json_array_lines
+	printf ',"storage":{"sizeKiB":'
+	json_quote "$gwrt_size"
+	printf ',"usedKiB":'
+	json_quote "$gwrt_used"
+	printf ',"availableKiB":'
+	json_quote "$gwrt_available"
+	printf ',"percent":'
+	json_quote "$gwrt_percent"
+	printf ',"mount":'
+	json_quote "$gwrt_mount"
+	printf '},"volumeCount":'
+	engine_volume_count
+	printf ',"images":'
+	engine_images_json
+	printf ',"containers":'
+	engine_containers_json
+	if [ -n "$gwrt_message" ]; then
+		printf ',"message":'
+		json_quote "$gwrt_message"
+	fi
+	printf '}\n'
+}
+
+apply_settings() {
+	local gwrt_requested_path gwrt_requested_mirrors gwrt_old_path gwrt_new_path
+	local gwrt_existing_path gwrt_current_mirrors gwrt_changed_path=0 gwrt_changed_mirrors=0 gwrt_needs_restart=0
+
+	gwrt_requested_path=$(form_value data_path)
+	gwrt_requested_mirrors=$(normalize_mirrors "$(form_value mirrors)") || api_error 'Invalid mirror URL. HTTPS registry host names only.'
+	gwrt_old_path=$(engine_data_path)
+	[ -n "$gwrt_old_path" ] || api_error 'The container runtime did not report a data path.'
+	gwrt_old_path=$(cd "$gwrt_old_path" 2>/dev/null && pwd -P) || api_error 'The current container data path is unavailable.'
+	case "$gwrt_requested_path" in
+		/*) ;;
+		*) api_error 'Choose an absolute directory on a mounted persistent filesystem.' ;;
+	esac
+	case "$gwrt_requested_path" in
+		*[!A-Za-z0-9_./@:+-]*) api_error 'Choose an absolute directory on a mounted persistent filesystem.' ;;
+	esac
+	if [ -d "$gwrt_requested_path" ]; then
+		gwrt_existing_path=$(cd "$gwrt_requested_path" 2>/dev/null && pwd -P) || api_error 'The requested data path is unavailable.'
+	fi
+	# The active runtime path is valid by definition. Do not reject a no-op
+	# save merely because an existing engine currently stores data in tmpfs.
+	if [ "$gwrt_existing_path" = "$gwrt_old_path" ]; then
+		gwrt_new_path=$gwrt_old_path
+	else
+		gwrt_new_path=$(normalize_data_path "$gwrt_requested_path") || api_error 'Choose an absolute directory on a mounted persistent filesystem.'
+	fi
+	gwrt_current_mirrors=$(engine_mirrors)
+
+	[ "$gwrt_new_path" = "$gwrt_old_path" ] || gwrt_changed_path=1
+	[ "$gwrt_requested_mirrors" = "$gwrt_current_mirrors" ] || gwrt_changed_mirrors=1
+	[ "$gwrt_changed_path" -eq 1 ] && gwrt_needs_restart=1
+	[ "$GWRT_ENGINE" = docker ] && [ "$gwrt_changed_mirrors" -eq 1 ] && gwrt_needs_restart=1
+
+	if [ "$gwrt_changed_path" -eq 1 ]; then
+		case "$gwrt_new_path/" in
+			"$gwrt_old_path/"*|"$gwrt_old_path") api_error 'The new data path cannot be inside the current data path.' ;;
+		esac
+		case "$gwrt_old_path/" in
+			"$gwrt_new_path/"*) api_error 'The new data path cannot contain the current data path.' ;;
+		esac
+		if path_has_data "$gwrt_old_path" && [ "$(form_value migrate)" != 1 ]; then
+			api_error 'Existing data requires migration confirmation.'
+		fi
+		if path_has_data "$gwrt_old_path" && path_has_data "$gwrt_new_path"; then
+			api_error 'The new data directory must be empty before migration.'
+		fi
+		if [ "$GWRT_ENGINE" = podman ] && [ "$(engine_volume_count)" -gt 0 ]; then
+			api_error 'Podman named volumes are present; move them manually before changing the graph root.'
+		fi
+	fi
+
+	# One-click save: any change that requires a runtime restart always stops
+	# the running containers, applies the configuration and starts everything
+	# again, without asking for a separate confirmation.
+	GWRT_RUNNING_IDS=$(engine_running_ids)
+
+	if ! mkdir "$GWRT_LOCK_DIR" 2>/dev/null; then
+		api_error 'Another container settings operation is already running.'
+	fi
+	trap 'rmdir "$GWRT_LOCK_DIR" 2>/dev/null' EXIT
+
+	if [ "$gwrt_needs_restart" -eq 1 ]; then
+		engine_stop_containers || api_error 'Could not stop the running containers.'
+		engine_stop_service || api_error 'Could not stop the container runtime.'
+	fi
+
+	if [ "$gwrt_changed_path" -eq 1 ] && path_has_data "$gwrt_old_path"; then
+		cp -a "$gwrt_old_path/." "$gwrt_new_path/" || {
+			engine_start_service >/dev/null 2>&1
+			engine_start_containers >/dev/null 2>&1
+			api_error 'Copying the existing container data failed.'
+		}
+	fi
+
+	if [ "$GWRT_ENGINE" = podman ]; then
+		if [ "$gwrt_changed_path" -eq 1 ] && ! write_podman_data_path "$gwrt_new_path"; then
+			restore_engine_config
+			engine_start_service >/dev/null 2>&1
+			engine_start_containers >/dev/null 2>&1
+			api_error 'Could not update Podman storage.conf.'
+		fi
+		if [ "$gwrt_changed_mirrors" -eq 1 ] && ! write_podman_registry_config "$gwrt_requested_mirrors"; then
+			restore_engine_config
+			engine_start_service >/dev/null 2>&1
+			engine_start_containers >/dev/null 2>&1
+			api_error 'Could not update the Podman registry configuration.'
+		fi
+	else
+		if { [ "$gwrt_changed_path" -eq 1 ] || [ "$gwrt_changed_mirrors" -eq 1 ]; } \
+			&& ! write_docker_settings "$gwrt_new_path" "$gwrt_requested_mirrors"; then
+			restore_engine_config
+			engine_start_service >/dev/null 2>&1
+			engine_start_containers >/dev/null 2>&1
+			api_error 'Could not update the Docker UCI configuration.'
+		fi
+	fi
+
+	if [ "$gwrt_needs_restart" -eq 1 ]; then
+		if ! engine_start_service || [ "$(engine_data_path)" != "$gwrt_new_path" ] || ! engine_start_containers; then
+			restore_engine_config
+			engine_start_service >/dev/null 2>&1
+			engine_start_containers >/dev/null 2>&1
+			api_error 'The new runtime configuration could not be started. The previous configuration was restored.'
+		fi
+	fi
+
+	emit_info 'Container settings saved.'
+}
+
+GWRT_SID=$(url_decode "$(query_raw sid)")
+valid_session "$GWRT_SID" || api_error 'A valid LuCI session is required.'
+detect_engine || api_error 'No supported container runtime is installed.'
+
+if [ "${REQUEST_METHOD:-GET}" = POST ]; then
+	# uhttpd does not consistently export custom request headers to CGI. The
+	# authenticated LuCI session ID above is therefore the mutation guard.
+	case "${CONTENT_LENGTH:-0}" in
+		''|*[!0-9]*) api_error 'Invalid request body.' ;;
+	esac
+	[ "$CONTENT_LENGTH" -le "$GWRT_MAX_BODY" ] || api_error 'The settings request is too large.'
+	GWRT_FORM_BODY=
+	IFS= read -r GWRT_FORM_BODY || true
+	case "$(form_value action)" in
+		save) apply_settings ;;
+		*) api_error 'Unsupported container settings action.' ;;
+	esac
+else
+	case "$(url_decode "$(query_raw action)")" in
+		'') emit_info '' ;;
+		browse) emit_browse "$(url_decode "$(query_raw path)")" ;;
+		*) api_error 'Unsupported container settings action.' ;;
+	esac
+fi

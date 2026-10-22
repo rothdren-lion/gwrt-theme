@@ -1,0 +1,73 @@
+#!/bin/sh
+# gwrt-gecoosac-sync — 将 /etc/gecoosac 数据外置到最大 mmcblk 数据分区
+# 解决 p27/p28 分区号漂移，首次自动迁移，之后 symlink/bind 保持
+
+set -eu
+
+INT_DIR="/etc/gecoosac"
+TAG="gwrt-gecoosac"
+
+log() { logger -t "$TAG" "$@" 2>/dev/null || echo "$TAG: $*" >&2; }
+
+find_mnt() {
+	# 顺从已有挂载：直接取 /proc/mounts 中已挂的最后 mmcblk 分区（/mnt 或 /mnt/mmcblk*，取分区号最大）
+	best=""; best_num=-1
+	while read -r dev mnt _; do
+		case "$mnt" in /mnt|/mnt/mmcblk*) ;; *) continue;; esac
+		case "$dev" in /dev/mmcblk*) ;; *) continue;; esac
+		num="$(printf '%s' "$dev" | sed -n 's/.*p\([0-9]*\)$/\1/p')"
+		[ -z "$num" ] && continue
+		case "$num" in ''|*[!0-9]*) continue;; esac
+		if [ "$num" -gt "$best_num" ]; then best="$mnt"; best_num="$num"; fi
+	done < /proc/mounts 2>/dev/null
+	if [ -n "$best" ]; then printf '%s' "$best"; return 0; fi
+	return 1
+}
+
+MNT="$(find_mnt 2>/dev/null || true)"
+if [ -z "$MNT" ]; then
+	log "no mmcblk data mount found"
+	exit 0
+fi
+
+EXT_DIR="$MNT/gecoosac"
+# 兼容旧路径 APK/app 为目录的情况：若用户曾放 APK/app，外置仍用 gecoosac
+mkdir -p "$EXT_DIR"
+
+# 已是外置则直接返回
+if [ -L "$INT_DIR" ]; then
+	link="$(readlink -f "$INT_DIR" 2>/dev/null || readlink "$INT_DIR" 2>/dev/null || true)"
+	if [ "$link" = "$EXT_DIR" ]; then
+		exit 0
+	fi
+	# 指向别处的外链，修正
+	rm -f "$INT_DIR"
+	ln -sfn "$EXT_DIR" "$INT_DIR"
+	log "relinked $INT_DIR -> $EXT_DIR"
+	exit 0
+fi
+
+# 首次迁移：把现有 /etc/gecoosac 内容搬到外置（若外置为空）
+if [ -d "$INT_DIR" ] && [ ! -L "$INT_DIR" ]; then
+	if [ -z "$(ls -A "$EXT_DIR" 2>/dev/null)" ] && [ -n "$(ls -A "$INT_DIR" 2>/dev/null)" ]; then
+		log "migrating $INT_DIR -> $EXT_DIR"
+		cp -a "$INT_DIR"/* "$EXT_DIR"/ 2>/dev/null || cp -a "$INT_DIR"/. "$EXT_DIR"/ 2>/dev/null || true
+	fi
+	# 移除原目录（保留备份以防回滚）
+	rm -rf "${INT_DIR}.bak" 2>/dev/null || true
+	mv "$INT_DIR" "${INT_DIR}.bak" 2>/dev/null || rm -rf "$INT_DIR"
+fi
+
+# 首次外置为空时，仅兼容旧 APK/app 目录；新的 APK/ 是用户自选包接口，不能混入 gecoosac 数据
+if [ -z "$(ls -A "$EXT_DIR" 2>/dev/null)" ]; then
+	for cand in "$MNT/APK/app" "$MNT/apk/app" ; do
+		if [ -d "$cand" ] && [ -n "$(ls -A "$cand" 2>/dev/null)" ]; then
+			log "seeding from $cand -> $EXT_DIR"
+			cp -a "$cand"/* "$EXT_DIR"/ 2>/dev/null || true
+			[ -n "$(ls -A "$EXT_DIR" 2>/dev/null)" ] && break
+		fi
+	done
+fi
+
+ln -sfn "$EXT_DIR" "$INT_DIR"
+log "externalized $INT_DIR -> $EXT_DIR (mnt=$MNT)"

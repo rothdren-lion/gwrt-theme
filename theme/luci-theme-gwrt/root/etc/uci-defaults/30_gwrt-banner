@@ -1,0 +1,50 @@
+#!/bin/sh
+# Keep the SSH login banner aligned with the LuCI homepage firmware card.
+
+release_file="/etc/openwrt_release"
+theme_file="/usr/share/gwrt/theme-version"
+model_file="/tmp/sysinfo/model"
+board_file="/tmp/sysinfo/board_name"
+site_url="https://gwrt.uk"
+accent_blue="$(printf '\033[38;5;39m')"
+accent_reset="$(printf '\033[0m')"
+
+dist="GWRT"
+fwver=""
+revision=""
+themever=""
+model_text=""
+
+[ -r "$release_file" ] && . "$release_file"
+
+[ -n "${DISTRIB_ID:-}" ] && dist="$DISTRIB_ID"
+[ -n "${DISTRIB_RELEASE:-}" ] && fwver="$DISTRIB_RELEASE"
+[ -n "${DISTRIB_REVISION:-}" ] && revision="$DISTRIB_REVISION"
+[ -r "$theme_file" ] && themever="$(sed -n '1p' "$theme_file")"
+[ -r "$model_file" ] && model_text="$(sed -n '1p' "$model_file")"
+[ -n "$model_text" ] || { [ -r "$board_file" ] && model_text="$(sed -n '1p' "$board_file")"; }
+
+dist="$(printf '%s' "$dist" | tr '[:lower:]' '[:upper:]')"
+[ -n "$fwver" ] || fwver="$(sed -n '1p' /etc/openwrt_version 2>/dev/null)"
+[ -n "$fwver" ] || fwver="V20260606"
+[ -n "$themever" ] || themever="1.0-r36"
+
+firmware_text="$(printf '%s %s' "$dist" "$fwver" | sed 's/[[:space:]][[:space:]]*/ /g')"
+model_text="$(printf '%s' "$model_text" | sed 's/[[:space:]][[:space:]]*/ /g')"
+[ -n "$model_text" ] || model_text="unknown"
+
+cat > /etc/banner <<EOF
+  ____ __        ______ _____
+ / ___|\ \      / /  _ \_   _|
+${accent_blue}| |  _ \ \ /\ / /| |_) || |${accent_reset}
+| |_| | \ V  V / |  _ < | |
+ \____|  \_/\_/  |_| \_\|_|
+
+ -----------------------------------------------------
+  ${firmware_text} + Theme ${themever}
+  Model ${model_text}
+  Source ${revision:-unknown}|${site_url}
+ -----------------------------------------------------
+EOF
+
+exit 0

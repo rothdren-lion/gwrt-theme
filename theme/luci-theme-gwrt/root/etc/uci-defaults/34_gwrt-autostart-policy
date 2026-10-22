@@ -1,0 +1,42 @@
+#!/bin/sh
+# 34_gwrt-autostart-policy — GWRT 发行版自启策略（首刷生效一次）
+#
+# 2026-10-03 用户确定（发行版面向他人选用）：
+#   默认开启：系统必要服务（不动）+ aof(appfilter) + eqos + 网络唤醒(etherwake)
+#              + 流量管理(bandix-plus) + gwrt-agent
+#   默认关闭（用户手工开）：daed、openclash、passwall、podman、samba4、aria2、
+#              gecoosac、transmission、nfs、miniupnpd 等
+#   原因：多代理是给用户选的，不是全开的；开机会吃光内存。
+#
+#   硬件加速（HNAT/ECM）默认开启，保证转发速度。oaf 开着但只看到未加速流量。
+#   需要完整 DPI 可见（活跃 APP 全量）时，用户手动关加速：
+#     uci set fwx.advanced.disable_hnat=1; uci commit fwx; /usr/bin/hnat.sh 0
+#   代价：转发走 CPU，slab 涨 ~100MB，千兆跑不满。
+#
+# 本脚本只在首次刷机运行一次。用户之后手动改的开关不受影响。
+
+# --- 必须开的（发行版默认）---
+for svc in appfilter eqos etherwake bandix-plus gwrt-agent; do
+	if [ -x "/etc/init.d/$svc" ]; then
+		/etc/init.d/$svc enable 2>/dev/null
+	fi
+done
+
+# --- 硬件加速默认开 ---
+if uci -q get fwx.advanced >/dev/null 2>&1; then
+	uci -q set fwx.advanced.disable_hnat='0'
+	uci -q commit fwx
+fi
+
+# --- 必须关的（用户手工开）---
+for svc in daed openclash passwall podman samba4 aria2 gecoosac transmission transmission-daemon nfs miniupnpd samba kixdns smartdns; do
+	if [ -x "/etc/init.d/$svc" ]; then
+		/etc/init.d/$svc disable 2>/dev/null
+		/etc/init.d/$svc stop 2>/dev/null
+	fi
+done
+
+# daed 例外说明：S99 是旧版残留，发行版默认手动。如用户已手动开启则不动。
+# （uci-defaults 只跑一次，已开启的用户配置不受影响。）
+
+exit 0

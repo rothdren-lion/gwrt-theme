@@ -1,0 +1,139 @@
+#!/bin/sh
+
+set -u
+
+DEVICE="br-lan"
+LABEL="br-lan:gwrt"
+IP=""
+CIDR=""
+NETWORK=""
+BROADCAST=""
+PREFIX=""
+
+json_escape() {
+	sed 's/\\/\\\\/g; s/"/\\"/g; s/	/\\t/g' | tr -d '\r'
+}
+
+fail() {
+	printf '{"ok":false,"error":"%s","message":"%s"}\n' \
+		"$(printf '%s' "$1" | json_escape)" \
+		"$(printf '%s' "$2" | json_escape)"
+	exit 1
+}
+
+list_aliases() {
+	ip -o -4 addr show dev "$DEVICE" scope global 2>/dev/null |
+		awk -v label="$LABEL" 'index($0, " " label) { print $4 }'
+}
+
+print_status() {
+	local sep="" alias
+
+	printf '{"ok":true,"device":"%s","aliases":[' "$DEVICE"
+	for alias in $(list_aliases); do
+		printf '%s"%s"' "$sep" "$(printf '%s' "$alias" | json_escape)"
+		sep=,
+	done
+	printf ']}\n'
+}
+
+parse_cidr() {
+	local value="$1" old_ifs octet first second calc
+
+	case "$value" in
+		""|*[!0-9./]*|*/*/*)
+			fail "invalid_cidr" "CIDR must be an IPv4 private address"
+			;;
+	esac
+
+	IP="${value%/*}"
+	PREFIX="${value#*/}"
+	[ "$IP" != "$value" ] || fail "invalid_cidr" "CIDR prefix is required"
+	case "$PREFIX" in
+		*[!0-9]*|"") fail "invalid_cidr" "CIDR prefix is invalid" ;;
+	esac
+	[ "$PREFIX" -ge 24 ] 2>/dev/null && [ "$PREFIX" -le 30 ] 2>/dev/null ||
+		fail "unsupported_prefix" "Temporary LAN aliases require /24 through /30"
+
+	old_ifs="$IFS"
+	IFS=.
+	set -- $IP
+	IFS="$old_ifs"
+	[ "$#" -eq 4 ] || fail "invalid_cidr" "IPv4 address is invalid"
+	first="$1"
+	second="$2"
+	for octet in "$@"; do
+		case "$octet" in *[!0-9]*|"") fail "invalid_cidr" "IPv4 address is invalid" ;; esac
+		[ "$octet" -le 255 ] 2>/dev/null || fail "invalid_cidr" "IPv4 address is invalid"
+	done
+
+	case "$first" in
+		10) : ;;
+		172) [ "$second" -ge 16 ] 2>/dev/null && [ "$second" -le 31 ] 2>/dev/null || fail "private_only" "Only RFC1918 private addresses are allowed" ;;
+		192) [ "$second" -eq 168 ] 2>/dev/null || fail "private_only" "Only RFC1918 private addresses are allowed" ;;
+		*) fail "private_only" "Only RFC1918 private addresses are allowed" ;;
+	esac
+
+	calc="$(/bin/ipcalc.sh "$IP/$PREFIX" 2>/dev/null)" || fail "invalid_cidr" "IPv4 address is invalid"
+	NETWORK="$(printf '%s\n' "$calc" | sed -n 's/^NETWORK=//p')"
+	BROADCAST="$(printf '%s\n' "$calc" | sed -n 's/^BROADCAST=//p')"
+	[ -n "$NETWORK" ] && [ -n "$BROADCAST" ] || fail "invalid_cidr" "IPv4 address is invalid"
+	[ "$IP" != "$NETWORK" ] && [ "$IP" != "$BROADCAST" ] ||
+		fail "invalid_host" "Alias address cannot be the network or broadcast address"
+	CIDR="$IP/$PREFIX"
+}
+
+check_route_safety() {
+	local route
+
+	route="$(ip -4 route get "$IP" 2>/dev/null | sed -n '1p')"
+	case "$route" in
+		*" dev $DEVICE "*) fail "already_lan" "This address is already on the LAN route" ;;
+		*" via "*) : ;;
+		*" dev "*) fail "route_conflict" "This network is already attached to another interface" ;;
+		*) : ;;
+	esac
+}
+
+add_alias() {
+	local alias
+
+	parse_cidr "$1"
+	check_route_safety
+	for alias in $(list_aliases); do
+		[ "$alias" = "$CIDR" ] && fail "already_exists" "This temporary address already exists"
+	done
+	ip -4 addr add "$CIDR" dev "$DEVICE" label "$LABEL" 2>/dev/null ||
+		fail "add_failed" "Cannot add the temporary LAN address"
+	print_status
+}
+
+del_alias() {
+	local alias found="false"
+
+	parse_cidr "$1"
+	for alias in $(list_aliases); do
+		[ "$alias" = "$CIDR" ] && found="true"
+	done
+	[ "$found" = "true" ] || fail "not_found" "Temporary LAN address was not found"
+	ip -4 addr del "$CIDR" dev "$DEVICE" 2>/dev/null ||
+		fail "delete_failed" "Cannot remove the temporary LAN address"
+	print_status
+}
+
+case "${1:-status}" in
+	status|list)
+		print_status
+		;;
+	add)
+		[ -n "${2:-}" ] || fail "missing_cidr" "CIDR is required"
+		add_alias "$2"
+		;;
+	del|delete|remove)
+		[ -n "${2:-}" ] || fail "missing_cidr" "CIDR is required"
+		del_alias "$2"
+		;;
+	*)
+		fail "usage" "Usage: gwrt-lan-alias status|add CIDR|del CIDR"
+		;;
+esac

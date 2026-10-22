@@ -1,0 +1,70 @@
+﻿{#
+	GWRT is a modern dark-first LuCI theme inspired by gwrt.uk
+
+	luci-theme-gwrt
+	Copyright 2025 GWRT Contributors
+
+	Licensed to the public under the Apache License 2.0
+-#}
+
+{% include("themes/" + theme + "/out_header_login") %}
+{%
+	import { access } from 'fs';
+	import { cursor } from 'uci';
+
+	let cfg = cursor();
+	let mode = 'dark';
+	if (access('/etc/config/gwrt')) {
+		let m = cfg.get_first('gwrt', 'theme', 'mode');
+		if (m === 'light') mode = 'light';
+	}
+
+	const boardinfo = ubus.call("system", "board");
+	const hostname = striptags(boardinfo?.hostname ?? 'OpenWrt');
+-%}
+
+<!-- Login Page -->
+<div class="login-wrapper luci-login-page">
+	<!-- Animated gradient orbs (background only on login) -->
+	<div class="login-orb login-orb-1"></div>
+	<div class="login-orb login-orb-2"></div>
+	<div class="login-orb login-orb-3"></div>
+
+	<!-- Login Card -->
+	<div class="login-card">
+		<div class="login-card-header">
+			<img src="{{ media }}/img/logo.svg" class="login-logo" alt="GWRT">
+			<span class="login-brand">{{ hostname }}</span>
+		</div>
+
+		<div class="login-card-body">
+			<form method="post" action="{{ http.getenv('REQUEST_URI') }}">
+				{%- if (fuser): %}
+				<div class="errorbox">{{ _('Invalid username and/or password! Please try again.') }}</div>
+				{% endif -%}
+
+				<div class="login-input-group">
+					<input class="cbi-input-user" id="cbi-input-user" type="text"
+						name="luci_username" placeholder="{{ _('Username') }}"
+						value="{{ entityencode(duser, true) }}" />
+				</div>
+
+				<div class="login-input-group">
+					<input class="cbi-input-password" id="cbi-input-password" type="password"
+						name="luci_password" placeholder="{{ _('Password') }}" />
+				</div>
+
+				<div>
+					<input type="submit" value="{{ _('Login') }}" class="cbi-button cbi-button-apply important login-submit" />
+				</div>
+			</form>
+
+			<script type="text/javascript">//<![CDATA[
+				var input = document.getElementsByName('luci_password')[0];
+				if (input) input.focus();
+			//]]></script>
+		</div>
+	</div>
+</div>
+
+{% include("themes/" + theme + "/footer_login") %}

@@ -1,0 +1,33 @@
+#!/bin/sh
+# GWRT: SMB —— 建 gwrt 账号（Win11 不允许无密码匿名），共享指向数据分区
+DL="$(uci -q get gwrt.downloads_dir)"; [ -n "$DL" ] || DL=/mnt/mmcblk0p27/downloads
+SHARE="$(uci -q get gwrt.storage_mount)"; [ -n "$SHARE" ] || SHARE=/mnt/mmcblk0p27
+mkdir -p "$SHARE/downloads" && chmod 0777 "$SHARE/downloads" 2>/dev/null
+
+# ① 建系统用户（chpasswd 报错说明必须先有用户）
+if ! grep -q '^gwrt:' /etc/passwd 2>/dev/null; then
+	adduser -D -H -s /bin/false gwrt 2>/dev/null || useradd -M -N -d /nonexistent -s /sbin/nologin gwrt 2>/dev/null
+fi
+echo 'gwrt:gwrt' | chpasswd 2>/dev/null
+
+# ② 建 samba 账号
+pkill -x smbd 2>/dev/null; sleep 1
+(echo -e "gwrt\ngwrt") | smbpasswd -s -a gwrt >/dev/null 2>&1
+smbpasswd -x gwrt >/dev/null 2>&1; (echo -e "gwrt\ngwrt") | smbpasswd -s -a gwrt >/dev/null 2>&1
+
+# ③ 共享段：先删后建（uci add 才是正解，set 匿名索引不可靠）
+while uci -q get samba4.@sambashare[0] >/dev/null 2>&1; do uci -q delete samba4.@sambashare[0]; done
+uci -q set samba4.smb_share='sambashare'
+uci -q set samba4.smb_share.name='gwrt'
+uci -q set samba4.smb_share.path="$SHARE"
+uci -q set samba4.smb_share.guest_ok='no'          # Win11 关键：禁匿名
+uci -q set samba4.smb_share.read_only='no'
+uci -q set samba4.smb_share.force_root='1'
+uci -q set samba4.smb_share.create_mask='0666'
+uci -q set samba4.smb_share.dir_mask='0777'
+uci -q set samba4.smb_share.inherit_owner='yes'
+uci -q commit samba4
+
+/etc/init.d/samba4 restart 2>/dev/null; sleep 2
+logger -t 42_gwrt-samba "SMB: 账号 gwrt/gwrt，共享 $SHARE（禁匿名，Win11 可连）"
+exit 0

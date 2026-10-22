@@ -1,0 +1,23 @@
+#!/bin/sh
+
+# Register gwrt theme in luci
+uci -q set luci.themes.Gwrt='/luci-static/gwrt'
+uci -q set luci.main.mediaurlbase='/luci-static/gwrt'
+uci -q set luci.languages.en='English'
+uci -q set luci.languages.zh_cn='简体中文 (Simplified Chinese)'
+uci -q commit luci
+
+# Configure the stable feed without replacing a custom URL.
+OTA_MANIFEST_BASE_URL='https://raw.githubusercontent.com/rothdren-lion/gwrt-ota/main/gwrt-ota/stable'
+OTA_LEGACY_MANIFEST_URL="${OTA_MANIFEST_BASE_URL}/gwrt-ota.json"
+uci -q get gwrt.ota >/dev/null || uci -q set gwrt.ota='ota'
+uci -q get gwrt.ota.enabled >/dev/null || uci -q set gwrt.ota.enabled='1'
+uci -q get gwrt.ota.channel >/dev/null || uci -q set gwrt.ota.channel='stable'
+[ -n "$(uci -q get gwrt.ota.manifest_base_url 2>/dev/null)" ] || uci -q set gwrt.ota.manifest_base_url="$OTA_MANIFEST_BASE_URL"
+# Clear only the old built-in single-model manifest URL so the OTA helper can select devices/<board>.json.
+if [ "$(uci -q get gwrt.ota.manifest_url 2>/dev/null)" = "$OTA_LEGACY_MANIFEST_URL" ]; then
+	uci -q delete gwrt.ota.manifest_url
+fi
+uci -q commit gwrt
+
+exit 0

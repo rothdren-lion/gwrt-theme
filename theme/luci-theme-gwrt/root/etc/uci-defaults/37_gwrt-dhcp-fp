@@ -1,0 +1,12 @@
+#!/bin/sh
+# 为 GWRT 主题启用 dnsmasq DHCP 指纹钩子（option 60/55 → 系统特性识别）
+# 仅当钩子存在且当前未指向它时设置；不覆盖用户自定义 dhcpscript。
+
+[ -x /usr/libexec/gwrt-dhcp-fp ] || exit 0
+
+cur="$(uci -q get dhcp.@dnsmasq[0].dhcpscript)"
+if [ "$cur" != "/usr/libexec/gwrt-dhcp-fp" ]; then
+	uci -q set dhcp.@dnsmasq[0].dhcpscript='/usr/libexec/gwrt-dhcp-fp'
+	uci -q commit dhcp
+fi
+exit 0

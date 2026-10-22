@@ -1,0 +1,27 @@
+#!/bin/sh
+# gwrt-podman - expose the podman container list as JSON to the dashboard.
+# Requires a valid LuCI session id passed as ?sid=<ubus_rpc_session>.
+# (uhttpd does not forward HTTP_COOKIE to cgi scripts, so the page JS
+# appends the session token it already has.)
+
+sid=$(printf '%s' "$QUERY_STRING" | sed -n 's/.*sid=\([^&]*\).*/\1/p')
+
+printf 'Content-Type: application/json\r\n\r\n'
+
+if [ -z "$sid" ]; then
+	printf '%s\n' '[]'
+	exit 0
+fi
+
+ubus call session get "{ \"ubus_rpc_session\": \"$sid\" }" >/dev/null 2>&1 || {
+	printf '%s\n' '[]'
+	exit 0
+}
+
+if [ -x /usr/bin/podman ]; then
+	podman ps -a --format json 2>/dev/null || printf '%s\n' '[]'
+elif [ -x /usr/bin/docker ]; then
+	docker ps -a --format json 2>/dev/null || printf '%s\n' '[]'
+else
+	printf '%s\n' '[]'
+fi

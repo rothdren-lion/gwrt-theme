@@ -1,0 +1,38 @@
+#!/bin/sh
+# GWRT: 存储布局规范化 —— 找出容量最大的可挂载分区，建标准 downloads 目录
+# 兼容 busybox：无 blockdev，用 sysfs size(扇区) × 512 估算
+
+GWRT_STORE_DEV=""
+best=0
+for dev in /dev/mmcblk*p* /dev/sd[a-z]* /dev/nvme*n*p*; do
+	[ -b "$dev" ] || continue
+	blk=$(basename "$dev")
+	[ -r "/sys/class/block/$blk/size" ] || continue
+	sect=$(cat "/sys/class/block/$blk/size" 2>/dev/null) || continue
+	sz=$((sect * 512))
+	[ "$sz" -gt "$best" ] || continue
+	best=$sz; GWRT_STORE_DEV="$dev"
+done
+
+[ -n "$GWRT_STORE_DEV" ] || { logger -t 40_gwrt-storage "未找到可用数据分区"; exit 0; }
+
+# 找 GWRT_STORE_DEV 的真实挂载点（/proc/mounts 里按设备名精确匹配）
+mp=""
+want=$(basename "$GWRT_STORE_DEV")
+awk -v w="$want" '$1 ~ ("^/dev/" w "$") {print $2; exit}' /proc/mounts 2>/dev/null | while read -r m; do
+	[ -d "$m" ] && echo "$m"
+done > /tmp/.gwrt_mp
+mp=$(head -1 /tmp/.gwrt_mp 2>/dev/null)
+rm -f /tmp/.gwrt_mp
+[ -z "$mp" ] && { mp=/mnt/storage; mkdir -p "$mp"; }
+
+mkdir -p "$mp/downloads" "$mp/downloads/aria2"
+chmod 0777 "$mp/downloads" "$mp/downloads/aria2" 2>/dev/null
+
+uci -q set gwrt.storage_dev="$GWRT_STORE_DEV"
+uci -q set gwrt.storage_mount="$mp"
+uci -q set gwrt.downloads_dir="$mp/downloads"
+uci -q commit gwrt
+
+logger -t 40_gwrt-storage "数据分区=$GWRT_STORE_DEV($((best/1024/1024))MB) 挂载点=$mp downloads=$mp/downloads"
+exit 0

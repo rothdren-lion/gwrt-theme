@@ -1,0 +1,16 @@
+#!/bin/sh
+# One-shot arming for gwrt-apk-autoinstall.
+# Enable the S99 service only when no persistent once-marker exists:
+#  - factory flash: no marker -> enable, first boot claims it and the
+#    worker disables the service itself (never runs again afterwards);
+#  - sysupgrade with kept settings: marker survives in the overlay ->
+#    do NOT re-arm, otherwise every later boot would spawn a useless
+#    worker instance that only logs "already claimed; skip";
+#  - factory reset: overlay (and the marker) is wiped -> re-arm.
+if [ -e /etc/gwrt/apk-autoinstall.once ]; then
+	exit 0
+fi
+if [ -x /etc/init.d/gwrt-apk-autoinstall ]; then
+	/etc/init.d/gwrt-apk-autoinstall enable >/dev/null 2>&1 || true
+fi
+exit 0

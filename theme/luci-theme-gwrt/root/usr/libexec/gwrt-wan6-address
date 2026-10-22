@@ -1,0 +1,10 @@
+#!/bin/sh
+# gwrt-wan6-address - print global IPv6 addresses of the given interfaces.
+# Dashboard fallback for the IPv6 address line (interface has no direct
+# public address reported by LuCI, e.g. relay/NAT66 setups).
+for gwrt_dev in "$@"; do
+	[ -n "$gwrt_dev" ] || continue
+	ip -6 addr show dev "$gwrt_dev" scope global 2>/dev/null \
+		| sed -n 's/.*inet6 \([0-9a-f:]\+\)\/.*/\1/p'
+done
+exit 0

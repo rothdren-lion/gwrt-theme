@@ -1,0 +1,81 @@
+#!/bin/sh
+# GWRT DHCP 指纹钩子（hotplug 版，2026-09-20 重写）
+#
+# 为什么从 dnsmasq --dhcp-script 改成 hotplug：
+#   原实现 /usr/libexec/gwrt-dhcp-fp 由 /usr/lib/dnsmasq/dhcp-script.sh source，
+#   但那个上下文跑在 **dnsmasq 的 ujail 沙箱里**，有两个致命缺陷（2026-09-20 实机定位）：
+#     ① 沙箱只挂 /bin/sh、/bin/ubus 和少数 lib，**没有 /usr/bin、没有 /bin/busybox**
+#        → tr / sed / grep 全部不存在 ⇒ 脚本第 16 行 `tr` 必然失败，
+#          实测日志刷了 300+ 条 "tr: not found"，指纹数据一条都没产出；
+#     ② 沙箱 /tmp 是**私有 tmpfs**（只 bind 了 /tmp/dhcp.leases 等少量文件）
+#        ⇒ 即使写得出文件，沙箱外的 clients.sh 也读不到。
+#   OpenWrt 的 /usr/lib/dnsmasq/dhcp-script.sh 尾部会执行
+#     `ubus call hotplug.dhcp call {...}`（env 数组含全部 DNSMASQ_* 变量），
+#   procd 在**沙箱外**拉起 /etc/hotplug.d/dhcp/*，工具链与 /tmp 都正常。
+#
+# 输入（hotplug 环境变量）：
+#   ACTION                    add / update / remove（dnsmasq 的 add/old/del 映射）
+#   MACADDR                   客户端 MAC
+#   DNSMASQ_VENDOR_CLASS      DHCP option 60（厂商类，OS 信号最强）
+#   DNSMASQ_REQUESTED_OPTIONS DHCP option 55（参数请求列表，经典 OS 指纹）
+#   DNSMASQ_CLIENT_ID         DHCP option 61
+# 输出：/tmp/gwrt-dhcp-fp.list，每行  mac|os|vendor_class|requested_options
+#   os ∈ android|windows|apple|linux|unknown
+#   clients.sh 会把它并进 /gwrt-clients.json 的 clients[].os，
+#   供主题按「先 MAC，后系统特性」决定图标。
+#
+# 幂等：同一 MAC 先删旧行再追加；解析失败不影响 DHCP。
+
+case "$ACTION" in
+	add|update|remove) ;;
+	*) exit 0 ;;
+esac
+
+mac="$(printf '%s' "$MACADDR" | tr 'A-F' 'a-f')"
+[ -n "$mac" ] || exit 0
+
+list=/tmp/gwrt-dhcp-fp.list
+
+if [ "$ACTION" = "remove" ]; then
+	[ -f "$list" ] && sed -i "/^$mac|/d" "$list" 2>/dev/null
+	exit 0
+fi
+
+vc="$DNSMASQ_VENDOR_CLASS"
+opts="$DNSMASQ_REQUESTED_OPTIONS"
+lvc="$(printf '%s' "$vc" | tr 'A-Z' 'a-z')"
+os=""
+
+# 1) 厂商类（option 60）优先
+case "$lvc" in
+	*android*)                             os=android ;;
+	*msft*|*microsoft*|*windows*)          os=windows ;;
+	*iphone*|*ipad*|*ipod*|*apple*)        os=apple ;;
+	*dhcpcd*)                              os=apple ;;
+	*udhcp*|*openwrt*|*busybox*|*linux*)   os=linux ;;
+esac
+
+# 2) option 55 参数请求列表兜底（各系统经典请求序列）
+opt_has() { case ",$opts," in *",$1,"*) return 0 ;; esac; return 1; }
+if [ -z "$os" ] && [ -n "$opts" ]; then
+	if   opt_has 249; then os=windows
+	elif opt_has 252; then os=apple
+	elif opt_has 2 && opt_has 12 && opt_has 42; then os=linux      # ISC dhclient 长清单
+	elif opt_has 26 && opt_has 28; then
+		if opt_has 119; then os=linux; else os=android; fi        # Android: 26,28 无 119
+	elif opt_has 119 || opt_has 121 || opt_has 44 || opt_has 47; then os=linux
+	fi
+fi
+
+# 3) option 61 为 DUID（ff:..）→ 典型 Linux（systemd-networkd / NetworkManager）
+if [ -z "$os" ] && [ -n "$DNSMASQ_CLIENT_ID" ]; then
+	case "$(printf '%s' "$DNSMASQ_CLIENT_ID" | tr 'A-F' 'a-f')" in
+		ff:*) os=linux ;;
+	esac
+fi
+
+[ -n "$os" ] || os=unknown
+
+[ -f "$list" ] && sed -i "/^$mac|/d" "$list" 2>/dev/null
+printf '%s|%s|%s|%s\n' "$mac" "$os" "$vc" "$opts" >> "$list"
+exit 0

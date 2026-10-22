@@ -1,0 +1,8 @@
+#!/bin/sh
+# 插拔/挂载 mmcblk 数据分区时自动同步 APK/app
+[ "$ACTION" = "add" ] || exit 0
+[ -n "$DEVNAME" ] || exit 0
+case "$DEVNAME" in mmcblk*p*) ;; *) exit 0;; esac
+# 等待 blockd 完成挂载
+sleep 1
+[ -x /usr/libexec/gwrt-gecoosac-sync ] && /usr/libexec/gwrt-gecoosac-sync 2>/dev/null || true

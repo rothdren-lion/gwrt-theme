@@ -1,0 +1,24 @@
+#!/bin/sh
+
+pidfile=/tmp/gwrt-coremark.pid
+
+running() {
+	[ -s "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null
+}
+
+if [ "$1" = status ]; then
+	running && echo running || echo idle
+	exit 0
+fi
+
+if running; then
+	echo running
+	exit 0
+fi
+
+(
+	trap 'rm -f "$pidfile"' EXIT
+	/etc/coremark.sh
+) >/tmp/gwrt-coremark.log 2>&1 &
+echo $! > "$pidfile"
+echo started
