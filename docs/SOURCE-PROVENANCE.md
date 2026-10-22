@@ -70,3 +70,32 @@
 WiFi 首启配置 `38/39/40b`、swap 初始化 `40a`、挂载策略 `45` 等）。
 
 配套插件包随仓库 `release/plugins/` 一并提供，详见 `docs/PLUGINS.md`。
+
+---
+
+## 开源版 r111（2026-10-22）：移除第三方应用特征数据库
+
+r111 在 r110 基础上，进一步移除了**所有第三方应用过滤相关的集成内容**：
+
+| 移除项 | 原始来源 | 说明 |
+|---|---|---|
+| `feature-db/feature.bin` | **OpenAppFilter**（`destan19/OpenAppFilter`），包内路径 `open-app-filter/files/feature.bin` → `/etc/fwxd/feature.bin` | OAF 的**专有应用特征数据库**（魔数 `FWXB`，31 KB，加密/压缩的应用特征库）。属第三方项目的数据库，不可随本仓库再发布 |
+| `overlays/package/gwrt-luci-app-oaf/` | OpenAppFilter 的 `luci-app-oaf` LuCI 视图 `app_filter.htm` | 被**改写并以 `PKG_FLAGS:=force-overwrite` 强制覆盖**第三方 LuCI 视图，删除 |
+| `manifest/overlay-files.txt` | — | overlay 清单已清空（原本只有上述两个 OAF 文件） |
+| `manifest/config.fragment` | — | 移除 `CONFIG_PACKAGE_luci-app-oaf` / `luci-i18n-oaf-zh-cn` / `appfilter` / `kmod-oaf` 四项，不再强制集成 |
+| `release/plugins/` 中的 OAF 包 | — | 移除 `luci-app-oaf-*.apk` / `luci-i18n-oaf-zh-cn-*.apk` / `appfilter-*.apk` 三个第三方二进制包 |
+
+### 保留的部分（属主题自有代码 / 公开数据）
+
+| 保留项 | 性质 |
+|---|---|
+| 主题对 `appfilter` / `oaf` ubus 接口的**可选探测**调用 | 纯运行时接口探测，不含第三方代码或数据；未安装对应插件时自动降级 |
+| `app-domain-map.json`（原 `oaf-app-map.json`） | 主题**自建**的「域名 → 应用 id/名称」映射表（223 条明文 JSON），用于图标匹配。与 OAF 的 `FWXB` 二进制库无关；为避免误会已重命名为中性名称 |
+| `oui-vendors.json` | 基于 **IEEE Publicly Available OUI** 公开列表整理的 44 厂商 / 8644 前缀映射表，用于设备品牌识别 |
+| `img/app_icons/`（226 张） | 应用图标（PNG），主题自有素材 |
+
+### 脚本适配
+
+`scripts/integrate.sh` 原先强制要求 `overlays/` 与 `manifest/overlay-files.txt` 存在，
+删除后会直接 fail。现已改为**可选**：目录或清单缺失时自动跳过 overlay 同步步骤，
+`--check` 与正常集成流程均已实测通过（`gwrt-theme: source copies, overlays and config are synchronized`）。

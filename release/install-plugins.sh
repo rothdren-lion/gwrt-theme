@@ -21,12 +21,12 @@ usage() {
   -h         显示帮助
 
 可安装的插件（缺失时主题会自动降级，不影响主题本体）:
-  luci-app-oaf        应用过滤（App Filter）— 仪表盘「活跃 App」依赖
-  kmod-oaf            OAF 内核模块 — 需按机型从固件源获取
   bandix-plus         流量统计 — 仪表盘「网速/连接排行」依赖
   luci-app-bandix-plus
   coremark            CPU 跑分 — 仪表盘「点击运行 CoreMark」依赖
   ttyd / luci-app-ttyd  Web 终端
+
+本脚本不安装任何第三方应用特征数据库或改写版第三方包。
   appfilter           应用特征库
 EOF
 }
@@ -60,9 +60,9 @@ ARCH="$(detect_arch)"
 log "系统架构：$ARCH"
 
 # ── 依赖插件清单 ────────────────────────────────────────────
-# 必需（仪表盘核心数据依赖）: oaf / bandix-plus
-# 可选: coremark / ttyd / openclash
-REQUIRED_PLUGINS="luci-app-oaf luci-i18n-oaf-zh-cn bandix-plus luci-app-bandix-plus luci-i18n-bandix-plus-zh-cn appfilter"
+# 必需（仪表盘核心数据依赖）: bandix-plus
+# 可选: coremark / ttyd
+REQUIRED_PLUGINS="bandix-plus luci-app-bandix-plus luci-i18n-bandix-plus-zh-cn"
 OPTIONAL_PLUGINS="luci-app-ttyd luci-i18n-ttyd-zh-cn"
 # 架构相关（仅 aarch64 有现成构建）
 ARCH_PLUGINS="ttyd coremark"

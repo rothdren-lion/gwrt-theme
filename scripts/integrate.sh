@@ -15,6 +15,11 @@ Usage: integrate.sh [--tree DIR] [--check] [--no-defconfig]
   --tree DIR       ImmortalWrt/OpenWrt source root (default: project parent)
   --check          Verify package copies, overlays and config without writing
   --no-defconfig   Sync and merge .config without running make defconfig
+
+Notes:
+  overlays/ is optional. The open-source release ships no compatibility
+  overlays (no third-party app-filter database or patched LuCI views);
+  when the directory or manifest is absent the overlay steps are skipped.
 EOF
 }
 
@@ -64,7 +69,9 @@ fail() {
 [ -d "$THEME_SRC/htdocs" ] || fail "canonical htdocs directory is missing"
 [ -d "$THEME_SRC/root" ] || fail "canonical root directory is missing"
 [ -f "$CONFIG_FRAGMENT" ] || fail "config fragment is missing"
-[ -f "$OVERLAY_LIST" ] || fail "overlay manifest is missing"
+# overlays/ 与 overlay 清单都是可选的：开源版不附带任何第三方应用过滤数据库或
+# 被打补丁的第三方 LuCI 视图，缺失时直接跳过 overlay 同步。
+[ -f "$OVERLAY_LIST" ] || OVERLAY_LIST=""
 
 check_copy() {
 	cmp -s "$THEME_SRC/Makefile" "$1/Makefile" || return 1
@@ -73,6 +80,7 @@ check_copy() {
 }
 
 check_overlays() {
+	[ -n "$OVERLAY_LIST" ] || return 0
 	while IFS= read -r rel || [ -n "$rel" ]; do
 		case "$rel" in ''|'#'*) continue ;; esac
 		cmp -s "$OVERLAY_SRC/$rel" "$TREE/$rel" || return 1
@@ -131,7 +139,9 @@ while IFS= read -r rel || [ -n "$rel" ]; do
 	[ -f "$OVERLAY_SRC/$rel" ] || fail "missing overlay: $rel"
 	mkdir -p "$(dirname -- "$TREE/$rel")"
 	cp "$OVERLAY_SRC/$rel" "$TREE/$rel"
-done < "$OVERLAY_LIST"
+done <<EOF
+${OVERLAY_LIST:+$(cat "$OVERLAY_LIST")}
+EOF
 
 [ -f "$TREE/.config" ] || fail "$TREE/.config is missing; select a hardware profile first"
 [ -x "$TREE/scripts/kconfig.pl" ] || fail "scripts/kconfig.pl is unavailable"

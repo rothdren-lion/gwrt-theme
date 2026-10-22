@@ -5,13 +5,11 @@
 ```
 release/
 ├── packages/                    # 主题包本体（已实测安装验证）
-│   ├── luci-theme-gwrt-1.0-r110.apk
-│   └── luci-theme-gwrt-1.0-r110.apk.sha256
-├── plugins/                     # 配套插件（架构无关）
-│   ├── appfilter-*.apk
+│   ├── luci-theme-gwrt-1.0-r111.apk
+│   └── luci-theme-gwrt-1.0-r111.apk.sha256
+├── plugins/                     # 配套插件（架构无关，均为上游原版包）
 │   ├── bandix-plus-*.apk
 │   ├── luci-app-bandix-plus-*.apk
-│   ├── luci-app-oaf-*.apk
 │   ├── luci-app-ttyd-*.apk
 │   └── luci-i18n-*.apk
 ├── plugins/aarch64/             # 架构相关二进制（ttyd / coremark）
@@ -27,7 +25,7 @@ release/
 ```sh
 # 1. 装主题
 wget -O /tmp/luci-theme-gwrt.apk \
-  https://raw.githubusercontent.com/rothdren-lion/gwrt-theme/main/release/packages/luci-theme-gwrt-1.0-r110.apk
+  https://raw.githubusercontent.com/rothdren-lion/gwrt-theme/main/release/packages/luci-theme-gwrt-1.0-r111.apk
 apk add --allow-untrusted /tmp/luci-theme-gwrt.apk
 
 # 2. 装配套插件
@@ -57,7 +55,7 @@ sh /etc/uci-defaults/36_gwrt-clients-init # 设备守护
 ## 校验
 
 ```sh
-sha256sum -c luci-theme-gwrt-1.0-r110.apk.sha256
+sha256sum -c luci-theme-gwrt-1.0-r111.apk.sha256
 ```
 
 ## 兼容性
@@ -71,3 +69,7 @@ sha256sum -c luci-theme-gwrt-1.0-r110.apk.sha256
 | 已验证 | JDCloud 雅典娜 AX6600（RE-CS-02，aarch64_cortex-a53，ImmortalWrt 6.18.52） |
 
 > 主题包不含 OTA（固件在线升级）功能，升级固件请走各固件自身的 OTA 通道。
+>
+> 本目录**不含任何第三方应用特征数据库**（如 OpenAppFilter 的 `feature.bin`），
+> 也不含被改写并强制覆盖的第三方 LuCI 视图。应用过滤相关能力由主题通过标准
+> ubus 接口可选探测，需该功能请自行从你所用固件的 package 源安装。

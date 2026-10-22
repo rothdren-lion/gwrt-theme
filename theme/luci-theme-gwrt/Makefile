@@ -5,7 +5,7 @@ LUCI_DEPENDS:=+luci-base
 
 PKG_NAME:=luci-theme-gwrt
 PKG_VERSION:=1.0
-PKG_RELEASE:=110
+PKG_RELEASE:=111
 
 # GWRT 2026-10-18: modal diet - default 880x76vh, drop backdrop-filter jank,
 # pause 3s dashboard polling while a plugin modal is open.

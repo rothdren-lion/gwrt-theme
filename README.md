@@ -2,7 +2,7 @@
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-ImmortalWrt%20%2F%20OpenWrt-informational)](https://openwrt.org)
-[![Version](https://img.shields.io/badge/version-1.0--r110-informational)](VERSION)
+[![Version](https://img.shields.io/badge/version-1.0--r111-informational)](VERSION)
 
 一个为 **ImmortalWrt / OpenWrt (LuCI, ucode 模板)** 设计的现代 LuCI 主题，内置信息密集型仪表盘、应用图标识别、设备品牌指纹、EQoS 限速面板。
 
@@ -24,7 +24,7 @@
 
 - **现代深/浅色双主题**：登录页与全站界面均支持一键切换，样式基于 CSS 变量（`cascade.css`）
 - **仪表盘首页**（`admin_status/index_gwrt.ut`）：系统信息、CPU/温度、内存存储、活跃 App、连接设备、连接数、网口状态图、NTP 同步、CoreMark 跑分等聚合展示
-- **应用图标识别**：内置 226 张 App 图标 + emoji 回退链（PNG → emoji → 分类 emoji → 📦），配合 OAF 应用过滤展示每个 App 的流量
+- **应用图标识别**：内置 226 张 App 图标 + emoji 回退链（PNG → emoji → 分类 emoji → 📦）；若系统装有应用过滤（appfilter）插件，可进一步按 App 展示流量
 - **设备品牌识别**：
   - `oui-vendors.json`：41 个品牌 / 8637 条 OUI 前缀
   - `clients.sh` 常驻守护 + `gwrt-dhcp-fp`（dnsmasq dhcp-script，option 60/55/61）采集设备指纹
@@ -36,6 +36,11 @@
 
 > **本仓库不含 OTA 功能**：固件在线升级（manifest 拉取 / 完整固件升级按钮）已移除，
 > 升级请走各固件自身的 OTA 通道。
+>
+> **本仓库不集成任何第三方应用特征数据库**：不含 OpenAppFilter 的 `feature.bin`，
+> 也不含被改写并强制覆盖的第三方 LuCI 视图。应用过滤相关能力全部通过
+> 标准 ubus 接口**可选探测**——系统自行安装 `appfilter` 插件时主题才会显示
+> 对应数据，未安装则自动降级。
 
 ## 🤖 让 Agent 一键接入
 
@@ -49,7 +54,7 @@
 请帮我把 GWRT LuCI 主题接入我的 OpenWrt / ImmortalWrt 设备。
 
 【仓库】https://github.com/rothdren-lion/gwrt-theme
-【主题版本】1.0-r110（Apache-2.0，开源版：已去除 OTA）
+【主题版本】1.0-r111（Apache-2.0，开源版：已去除 OTA 与第三方应用特征库）
 
 ━━━ 第一步：判断接入方式 ━━━
 
@@ -95,12 +100,12 @@ C) 我只有主题包文件（.ipk / .apk），没有源码树
    sh 36_gwrt-clients-init # 启用设备守护
    sh 37_gwrt-dhcp-fp     # 启用 DHCP 指纹钩子
 3. 插件按架构选：release/plugins/*.apk（通用）、release/plugins/aarch64/（二进制）
-   kmod-oaf 必须按机型获取，不可跨架构
+   内核模块类插件必须按机型获取，不可跨架构
 
 ━━━ 通用注意事项 ━━━
 
 - 本仓库已去除 OTA 功能。
-- 主题不强制依赖配套插件：缺 OAF 则「活跃 App」为空，缺 bandix-plus 则网速卡片回退。
+- 主题不强制依赖配套插件：缺应用过滤插件则「活跃 App」为空，缺 bandix-plus 则网速卡片回退。
 - 装完必须清 LuCI 缓存 + reload rpcd。
 - 开发时只改 theme/luci-theme-gwrt/，改完跑 integrate.sh 同步。
 
@@ -117,11 +122,9 @@ C) 我只有主题包文件（.ipk / .apk），没有源码树
 
 | 插件 | 用途 | 缺失后果 | 架构 |
 |---|---|---|---|
-| `luci-app-oaf` + `appfilter` | 应用过滤 | 「活跃 App」为空 | 无关 |
 | `bandix-plus` + `luci-app-bandix-plus` | 流量统计 | 网速卡片无速率 | 无关 |
 | `coremark` | CPU 跑分 | 无跑分按钮 | **aarch64** |
 | `ttyd` + `luci-app-ttyd` | Web 终端 | 无 Terminal 图标 | **aarch64** |
-| `kmod-oaf` | OAF 内核模块 | OAF 无法安装 | **必须按机型获取** |
 
 一键安装：
 
@@ -142,13 +145,11 @@ wget -O- https://raw.githubusercontent.com/rothdren-lion/gwrt-theme/main/release
 │   ├── root/etc/uci-defaults/     # 首刷初始化脚本（30~44 号）
 │   ├── root/etc/init.d/           # gwrt-clients 守护
 │   └── Makefile                   # OpenWrt 包 Makefile（Apache-2.0）
-├── overlays/                  # 配套补丁：OAF 应用过滤逐 App 勾选修复
 ├── manifest/config.fragment   # 固件侧主题相关功能包配置片段
 ├── scripts/integrate.sh       # 将主题源码同步进固件树并合并配置
 ├── scripts/build-with-theme.sh# 一键集成 + 编译
 ├── release/                   # 预编译配套插件包 + 一键安装脚本
-├── docs/                      # 预览图 / 插件说明 / Agent 提示词 / 来源说明
-└── feature-db/feature.bin     # OAF 应用特征库
+└── docs/                      # 预览图 / 插件说明 / Agent 提示词 / 来源说明
 ```
 
 ## 🚀 使用

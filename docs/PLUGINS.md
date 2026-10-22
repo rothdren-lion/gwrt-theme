@@ -10,13 +10,9 @@ GWRT 主题的核心（仪表盘、主题样式、菜单、设备指纹、EQoS �
 
 | 插件 | 作用 | 缺失后果 | 架构 |
 |---|---|---|---|
-| `luci-app-oaf` | 应用过滤 LuCI 界面 | 仪表盘「活跃 App」为空 | 无关（Lua/JS） |
-| `luci-i18n-oaf-zh-cn` | OAF 中文翻译 | OAF 界面英文 | 无关 |
-| `appfilter` | 应用特征库（750+ App 特征） | 应用识别准确率下降 | 无关（脚本/数据） |
 | `bandix-plus` | 流量统计守护 | 「网速-EQoS」卡片无实时速率、连接排行空白 | 无关（脚本/Lua） |
 | `luci-app-bandix-plus` | bandix-plus LuCI 界面 | 同上 | 无关 |
 | `luci-i18n-bandix-plus-zh-cn` | bandix 中文翻译 | 界面英文 | 无关 |
-| `kmod-oaf` | OAF 内核模块 | **无法安装 OAF**（依赖不满足） | **架构相关，必须按机型获取** |
 
 ### 可选插件（纯粹是锦上添花）
 
@@ -26,17 +22,23 @@ GWRT 主题的核心（仪表盘、主题样式、菜单、设备指纹、EQoS �
 | `ttyd` + `luci-app-ttyd` | Web 终端 | 概览网格无「Terminal」图标 | **aarch64 预编译** |
 | `luci-app-openclash` | 科学上网 | 概览网格无「科学上网」图标 | 无关（Lua） |
 
-> `kmod-oaf` 无法通用打包：它是内核模块，必须与目标机型的内核版本（6.18.x）严格匹配。
-> 请从该机型自己的固件源获取，或用 `scripts/integrate.sh` 集成编译。
+### 关于应用过滤（appfilter）
+
+主题**不附带也不集成**任何第三方应用特征数据库或被改写的第三方 LuCI 视图。
+仪表盘的「活跃 App」卡片通过标准 ubus 接口（`appfilter` / `oaf`）**可选探测**：
+- 系统自行安装了应用过滤插件 → 主题展示对应 App 数据
+- 未安装 → 该卡片降级为空，其余功能不受影响
+
+如果你需要该功能，请自行从你所用固件的 package 源安装对应插件
+（`appfilter` / `luci-app-oaf` / `kmod-oaf`），并注意 `kmod-oaf` 是内核模块，
+必须与目标机型的内核版本严格匹配，不可跨架构复制。
 
 ## 2. 仓库内的插件包位置
 
 ```
-release/plugins/                 架构无关（Lua / JS / 脚本 / 数据）
-  appfilter-*.apk
+release/plugins/                 架构无关（Lua / JS / 脚本）
   bandix-plus-*.apk
   luci-app-bandix-plus-*.apk
-  luci-app-oaf-*.apk
   luci-app-ttyd-*.apk
   luci-i18n-*.apk
 release/plugins/aarch64/         aarch64 二进制
@@ -45,6 +47,9 @@ release/plugins/aarch64/         aarch64 二进制
 release/plugins/optional/        大体积可选插件
   luci-app-openclash-*.apk
 ```
+
+> 本目录只提供**原版上游**构建的插件包（Apache-2.0 / MIT，允许再分发）。
+> 任何被修改过的第三方组件、以及第三方专有数据库，均不随本仓库发布。
 
 一键安装（在路由器上执行）：
 
@@ -89,7 +94,7 @@ wget -O- https://raw.githubusercontent.com/rothdren-lion/gwrt-theme/main/release
 apk 的 `post-install` 顺序是：`default_postinst`（执行 uci-defaults）→ 再追加
 `postinst-pkg`（luci.mk 的默认 postinst 会 `rm -f /tmp/luci-indexcache.*` + `rpcd reload`）。
 
-> **实测记录（2026-10-22，r110 → 雅典娜 AX6600）**：
+> **实测记录（2026-10-22，r110/r111 → 雅典娜 AX6600）**：
 > 首次 `apk add` 正常执行 uci-defaults；随后同版本 `apk add`（Replacing）时
 > `/etc/uci-defaults/` 中 19 个 GWRT 脚本全部残留未执行，
 > 导致仪表盘入口模板（`admin_status/index.ut`）未被创建、DHCP 指纹钩子未启用。
@@ -146,7 +151,7 @@ rm -f /tmp/luci-indexcache.*; rm -rf /tmp/luci-modulecache/
 
 > **主题包是自包含的，单独编译 ipk/apk 安装不会功能缺失** ——
 > 仪表盘、主题样式、设备指纹、EQoS 面板全部可用（已在真机实测验证）。
-> 唯一需要留意的是：① 配套插件（OAF/bandix-plus）要另外装，否则对应卡片降级；
+> 唯一需要留意的是：① 配套插件（bandix-plus 等）要另外装，否则对应卡片降级；
 > ② 装完清 LuCI 缓存 + reload rpcd；③ **重装/升级场景下 uci-defaults 不会自动执行**，
 > 需手动补跑 `33_gwrt-dashboard`（仪表盘入口）、`37_gwrt-dhcp-fp`（设备指纹）、
 > `36_gwrt-clients-init`（设备守护）三个关键脚本。
@@ -157,7 +162,7 @@ rm -f /tmp/luci-indexcache.*; rm -rf /tmp/luci-modulecache/
 
 | 检查项 | 结果 |
 |---|---|
-| `apk add` 安装 r110 | ✅ 成功（775 文件 / 3.0 MB） |
+| `apk add` 安装 r111 | ✅ 成功（775 文件 / 3.0 MB） |
 | 主题包文件完整性 | ✅ 9/9 关键路径就位 |
 | 仪表盘渲染 | ✅ `.gwrt-dashboard` 存在，47 个网格图标、60 行设备表 |
 | OTA 按钮 | ✅ 已移除（`gwrtOtaBtn` 不存在） |
@@ -192,7 +197,7 @@ pgrep -f clients.sh && /etc/init.d/gwrt-clients status
 uci get dhcp.@dnsmasq[0].dhcpscript    # 期望 /usr/libexec/gwrt-dhcp-fp
 
 # 6. 配套插件
-apk info -e luci-app-oaf bandix-plus coremark 2>/dev/null
+apk info -e bandix-plus luci-app-bandix-plus coremark 2>/dev/null
 ```
 
 浏览器打开 `http://<router-ip>/cgi-bin/luci/admin/status/overview`，

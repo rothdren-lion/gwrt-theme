@@ -10,7 +10,7 @@
 请帮我把 GWRT LuCI 主题接入我的 OpenWrt / ImmortalWrt 设备。
 
 【仓库】https://github.com/rothdren-lion/gwrt-theme
-【主题版本】1.0-r110（Apache-2.0，开源版：已去除 OTA）
+【主题版本】1.0-r111（Apache-2.0，开源版：已去除 OTA 与第三方应用特征库）
 【支持平台】ImmortalWrt / OpenWrt，LuCI ucode 模板（24.10 及以后）
 
 ━━━ 第一步：判断接入方式 ━━━
@@ -63,7 +63,7 @@ C) 我只有主题包文件（.ipk / .apk），没有源码树
    ssh root@<ip> 'apk add --allow-untrusted /tmp/luci-theme-gwrt-*.apk'
    （opkg 系统：scp *.ipk 后 opkg install /tmp/luci-theme-gwrt-*.ipk）
 
-3. 安装配套插件（应用过滤 OAF / 流量统计 bandix-plus / 跑分 / Web 终端）：
+3. 安装配套插件（流量统计 bandix-plus / 跑分 coremark / Web 终端 ttyd）：
    ssh root@<ip> 'wget -O- https://raw.githubusercontent.com/rothdren-lion/gwrt-theme/main/release/install-plugins.sh | sh'
    或下载后本地执行：sh install-plugins.sh
 
@@ -100,12 +100,12 @@ C) 我只有主题包文件（.ipk / .apk），没有源码树
 2. 配套插件同样从 release/plugins/ 取，按架构选择：
    - 架构无关：release/plugins/*.apk
    - aarch64 二进制：release/plugins/aarch64/{ttyd,coremark}.apk
-   - kmod-oaf 必须按机型从固件源获取，不可跨架构
+   - 内核模块类插件必须按机型从固件源获取，不可跨架构
 
 ━━━ 通用注意事项 ━━━
 
 - 本仓库已去除 OTA（固件在线升级）相关功能，不含任何 OTA manifest 配置。
-- 主题**不强制依赖**配套插件：缺 OAF 则「活跃 App」为空，缺 bandix-plus 则网速卡片回退，缺 coremark 则无跑分按钮。主题本体始终可独立安装。
+- 主题**不强制依赖**配套插件：缺 bandix-plus 则网速卡片回退，缺 coremark 则无跑分按钮。主题本体始终可独立安装。
 - 装完必须清理 LuCI 缓存（/tmp/luci-indexcache.*、/tmp/luci-modulecache/）并 reload rpcd，否则页面仍是旧模板。
 - 主题会替换 /usr/share/ucode/luci/template/admin_status/index.ut（原文件备份为 index.ut.bak-src）。这是仪表盘的入口，替换失败会导致仪表盘不显示。
 - 开发时：只改仓库里的 theme/luci-theme-gwrt/，改完跑 integrate.sh 同步到固件树；不要直接改固件树里 package/gwrt-theme/ 的副本。
@@ -129,8 +129,8 @@ C) 我只有主题包文件（.ipk / .apk），没有源码树
 
 | 追问 | 回答 |
 |---|---|
-| 主题需要哪些插件？ | OAF（应用过滤）、bandix-plus（流量统计）、coremark（跑分）、ttyd（Web 终端）。**全部可选**，缺失只降级不报错 |
-| `kmod-oaf` 从哪来？ | 必须与目标机型/内核版本匹配，从该机型固件的 package 源获取，不可跨架构复制 |
+| 主题需要哪些插件？ | bandix-plus（流量统计）、coremark（跑分）、ttyd（Web 终端）。**全部可选**，缺失只降级不报错。应用过滤功能需自行从固件源安装，仓库不附带 |
+| 应用过滤插件从哪来？ | 仓库不附带（含第三方特征数据库与改写版视图）。请从你所用固件的 package 源安装；内核模块类必须与目标机型/内核版本匹配，不可跨架构复制 |
 | 装完仪表盘还是原生 LuCI？ | 清 `/tmp/luci-indexcache.*` + `/tmp/luci-modulecache/` 并 `reload rpcd`；再检查 `admin_status/index.ut` 是否已被替换 |
 | 会覆盖我的原生 LuCI 吗？ | 只覆盖 `admin_status/index.ut`（备份为 `index.ut.bak-src`）和注册 `luci.themes.Gwrt`，其余页面样式跟随主题 |
 | 支持哪些机型？ | 主题本体与平台无关（纯 ucode/JS/CSS），不限定机型；二进制插件 `ttyd`/`coremark` 目前只提供 aarch64 构建 |
