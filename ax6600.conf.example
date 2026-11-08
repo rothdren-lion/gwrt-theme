@@ -2,8 +2,8 @@
 # 放入外置最后分区 apk/ 目录（/mnt/mmcblk*p*/apk/ax6600.conf 或 /mnt/apk/ax6600.conf）
 # 全部可选，缺省不改；首次刷机/重置生效，二次自动失效，可 cat /tmp/gwrt-apk-autoinstall.log 查看，打断：touch /tmp/gwrt-apk-autoinstall.abort
 
-# LAN 固定 IP（默认 192.168.10.1）
-lan_ip=192.168.9.9
+# LAN 固定 IP（默认 192.168.3.3）
+lan_ip=192.168.3.3
 lan_netmask=255.255.255.0
 
 # WAN 三选一：
@@ -22,12 +22,12 @@ wan_password=pppoe密码
 
 # WiFi 按频段（顺序 2.4G -> 5.8G -> 5.2G，AX6600 5.8G=IPQ6018 5.2G=QCN9074）
 wifi_2g_ssid=Rodren
-wifi_2g_key=Abc123abc!!
+wifi_2g_key=********
 wifi_5g_ssid=AX6600_Gaming
-wifi_5g_key=Abc123abc???
+wifi_5g_key=*********
 # 5.2G 另起（可选，QCN 正常时生效）
 #wifi_5g2_ssid=AX6600_5G2
-#wifi_5g2_key=Abc123abc???
+#wifi_5g2_key=********
 
 # 通用兜底（未分频段时对所有 default_* 生效）
 #wifi_ssid=MyWifi
